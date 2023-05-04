@@ -1,0 +1,525 @@
+# Calculate Enrichment Score
+```{r}
+dir.create("05.rmps_scSeq")
+sc_MMR = readRDS("01.datatidy/sc_MMR.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+sc_Ann = data.table::fread("01.datatidy/scAnn.txt", header = F)
+colnames(sc_Ann) = c("symbol", "ensg")
+sc_Ann$ensg = stringr::str_split(sc_Ann$ensg, "_", simplify = T)[,1]
+
+## subset RMP scSeq object
+convertRownames <- function(seu_object, scAnn) {
+  new_rownames <- sc_Ann$symbol[match(rownames(seu_object), sc_Ann$ensg)]
+  rownames(seu_object@assays$RNA@counts) <- new_rownames
+  rownames(seu_object@assays$RNA@data) <- new_rownames
+  return(seu_object)
+}
+sc_MMR = convertRownames(seu_object = sc_MMR, scAnn = sc_Ann)
+
+table(rmps$Symbol %in% row.names(sc_MMR))
+scRMP =sc_MMR[rmps$Symbol,]
+saveRDS(scRMP, file = "01.datatidy/scRMP.rds")
+
+## calculate rmp enrichment score
+library(Seurat)
+steps = seq(from = 1, to = 371223, by = 1000)
+steps[373] = 371223
+
+rmp_enrich = list()
+for (i in 1:(length(steps)-1)) {
+  tempdat = sc_MMR@assays$RNA@counts[,steps[i]:steps[i+1]] # 371223
+  sets = list(rmps = rmps$Symbol)
+  gsva_RMPS <- GSVA::gsva(tempdat,
+                          sets,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+  rmp_enrich[[i]] = gsva_RMPS
+}
+saveRDS(rmp_enrich, file = "05.scSeq/rmp_enrich.rds")
+
+## get meta information
+metaIn = sc_MMR@meta.data
+tsne = data.table::fread("05.rmps_scSeq/tsne.tsv")
+for (i in 1:length(rmp_enrich)) {
+  if (i == 1) {
+    rmp_enrich[[i]] = rmp_enrich[[i]]@x
+  }else{
+    rmp_enrich[[i]] = rmp_enrich[[i]]@x[2:length( rmp_enrich[[i]]@x)]
+  }
+}
+rmps_score = unlist(rmp_enrich)
+metaIn$rmps_score = rmps_score
+metaIn$sampleID = row.names(metaIn)
+metaIn = dplyr::left_join(metaIn, tsne, by = "sampleID")
+saveRDS(metaIn, file = "05.rmps_scSeq/rmp_enrich_meta.rds")
+```
+
+# Analysis: Differential RMPS_enrich: Tumor vs Normal
+## scatter plot: landscape
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+library(ggpubr)
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))(8)
+colorGrad = c("#e66101",
+               "#fdb863",
+               "#f7f7f7",
+               "#b2abd2",
+               "#5e3c99")
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+
+p1 = dat %>% subset(SPECIMEN_TYPE == "N") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color = clTopLevel)) +
+  geom_point() + 
+  theme_classic() +
+  scale_color_manual(values = rev(getPalette)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+p1
+p2 = dat %>% subset(SPECIMEN_TYPE == "T") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color = clTopLevel)) +
+  geom_point() + 
+  theme_classic() +
+  scale_color_manual(values = rev(getPalette)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+p3 = dat %>% subset(SPECIMEN_TYPE == "N") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=rmps_score)) +
+  geom_point() + 
+  theme_classic() +
+  scale_colour_gradientn(colors=rev(colorGrad))+ 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+p4 = dat %>% subset(SPECIMEN_TYPE == "T") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=rmps_score)) +
+  geom_point() + 
+  theme_classic() +
+  scale_colour_gradientn(colors=rev(colorGrad)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+p = (p1 | p2 ) / (p3 | p4)
+# ggsave(p1, filename = "05.scSeq/sc_normal.pdf", width = 5, height = 4)
+# ggsave(p2, filename = "05.scSeq/sc_tumor.pdf", width = 5, height = 4)
+# ggsave(p3, filename = "05.scSeq/sc_normal_rmps.pdf", width = 5, height = 4)
+# ggsave(p4, filename = "05.scSeq/sc_tumor_rmps.pdf", width = 5, height = 4)
+ggsave(p, filename = "05.rmps_scSeq/sc_enrichment.png", width = 10, height = 8, dpi = 2048)
+
+```
+
+## Analysis: rmps_enrich_main_type
+```{r}
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+dat = split(dat, dat$SPECIMEN_TYPE)
+
+Analysis = function(obj){
+  obj = split(obj, obj$clTopLevel)
+  mean_value = lapply(obj, function(x){x = mean(x$rmps_score)})
+  sd_value = lapply(obj, function(x){x = sd(x$rmps_score)})
+  n_sum = lapply(obj, function(x){x = nrow(x)})
+  n_sum_total = sum(unlist(n_sum))
+  component = lapply(n_sum, function(x){x = x/n_sum_total*100})
+  out = data.frame(cell = names(obj), 
+                   mean_rmps = round(unlist(mean_value),3),
+                   sd = paste("±", round(unlist(sd_value),3), sep = ""),
+                   component = round(unlist(component),3))
+  return(out)
+}
+
+res = lapply(dat, Analysis)
+res = do.call(rbind, res)
+res$Type = stringr::str_split(row.names(res), "[.]", simplify = T)[,1]
+write.table(res, file = "05.rmps_scSeq/enrich_landscape_tumor_normal.xls",
+      row.names = F, sep = "\t")
+saveRDS(res, file = "05.rmps_scSeq/summ_land_N_T.rds")
+```
+
+## violin plot: landscape
+```{r}
+library(RColorBrewer)
+library(dplyr)
+library(ggplot2)
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+summ = readRDS("05.rmps_scSeq/summ_land_N_T.rds")
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))(11)
+# input = dat %>% subset(SPECIMEN_TYPE == "T")
+# input = dat 
+# %>% subset(SPECIMEN_TYPE == "N")
+N_summ = subset(summ, Type == "N")
+
+df = subset(dat, SPECIMEN_TYPE == "N")
+p1 = df %>% 
+  ggplot(mapping = aes(x = clTopLevel, y = rmps_score)) + 
+  geom_violin(aes(fill = clTopLevel)) +
+  geom_point(data = N_summ,
+             mapping = aes(x = cell, y = mean_rmps),
+             color="black") +
+  geom_line(data = N_summ, 
+            mapping = aes(x = cell, y = mean_rmps),
+            color="black", group=1)+
+  # geom_text(data = N_summ, mapping = aes(x = cell, label = component)) +
+  theme_classic() +
+  ylab("Enrichment score") +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))+
+  scale_fill_manual(values = rev(getPalette))
+
+
+T_summ = subset(summ, Type == "T")
+df = subset(dat, SPECIMEN_TYPE == "T")
+p2 = df %>% 
+  ggplot(mapping = aes(x = clTopLevel, y = rmps_score)) + 
+  geom_violin(aes(fill = clTopLevel)) +
+  geom_point(data = T_summ,
+             mapping = aes(x = cell, y = mean_rmps),
+             color="black") +
+  geom_line(data = T_summ, 
+            mapping = aes(x = cell, y = mean_rmps),
+            color="black", group=1)+
+  theme_classic() +
+  ylab("Enrichment score") +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))+
+  scale_fill_manual(values = rev(getPalette))
+
+p = (p1 / p2)
+ggsave(p, filename = "05.rmps_scSeq/sc_enrichment_violin.pdf", width = 5, height = 4)
+```
+
+## scatter plot: epi
+```{r}
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))(11)
+p1 = dat %>% subset(clTopLevel == "Epi") %>%
+  subset(SPECIMEN_TYPE == "N") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=clFull)) +
+  geom_point() + 
+  theme_classic() +
+  scale_color_manual(values = rev(getPalette)) + 
+  # scale_colour_gradientn(colors=rev(colorGrad)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+p2 = dat %>% subset(clTopLevel == "Epi") %>%
+  subset(SPECIMEN_TYPE == "T") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=clFull)) +
+  geom_point() + 
+  theme_classic() +
+  scale_color_manual(values = rev(getPalette)) + 
+  # scale_colour_gradientn(colors=rev(colorGrad)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+
+p3 = dat %>% subset(clTopLevel == "Epi") %>% subset(SPECIMEN_TYPE == "N") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=rmps_score)) +
+  geom_point() + 
+  theme_classic() +
+  scale_colour_gradientn(colors=rev(colorGrad))+ 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+p4 = dat %>% subset(clTopLevel == "Epi")%>% subset(SPECIMEN_TYPE == "T") %>%
+  ggplot(., aes(x = ydata_1, y = ydata_2, color=rmps_score)) +
+  geom_point() + 
+  theme_classic() +
+  scale_colour_gradientn(colors=rev(colorGrad)) + 
+  theme(axis.line = element_blank(), axis.title = element_blank(), 
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+p = (p1 | p2 ) / (p3 | p4)
+ggsave(p, filename = "05.rmps_scSeq/sc_enrichment_Epi.png", width = 10, height = 8, dpi = 2048)
+ggsave(p1, filename = "05.rmps_scSeq/sc_normal_Epi.pdf", width = 5, height = 4)
+ggsave(p2, filename = "05.rmps_scSeq/sc_tumor_Epi.pdf", width = 5, height = 4)
+ggsave(p3, filename = "05.rmps_scSeq/sc_normal_rmps_Epi.pdf", width = 5, height = 4)
+ggsave(p4, filename = "05.rmps_scSeq/sc_tumor_rmps_Epi.pdf", width = 5, height = 4)
+```
+
+
+## Analysis: rmps_enrich_epi_type
+```{r}
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+dat = subset(dat, clTopLevel == "Epi")
+dat = split(dat, dat$SPECIMEN_TYPE)
+
+Analysis = function(obj){
+  obj = split(obj, obj$clFull)
+  mean_value = lapply(obj, function(x){x = mean(x$rmps_score)})
+  sd_value = lapply(obj, function(x){x = sd(x$rmps_score)})
+  n_sum = lapply(obj, function(x){x = nrow(x)})
+  n_sum_total = sum(unlist(n_sum))
+  component = lapply(n_sum, function(x){x = x/n_sum_total*100})
+  out = data.frame(cell = names(obj), 
+                   mean_rmps = round(unlist(mean_value),3),
+                   sd = paste("±", round(unlist(sd_value),3), sep = ""),
+                   component = round(unlist(component),3))
+  return(out)
+}
+
+res = lapply(dat, Analysis)
+res = do.call(rbind, res)
+res$Type = stringr::str_split(row.names(res), "[.]", simplify = T)[,1]
+write.table(res, file = "05.rmps_scSeq/enrich_epi_tumor_normal.xls",
+      row.names = F, sep = "\t")
+saveRDS(res, file = "05.rmps_scSeq/summ_epi_N_T.rds")
+```
+
+## Analysis: rmps_enrich_other_type
+"Epi"     "TNKILC"  "Strom"   "Myeloid" "B"       "Mast"    "Plasma"
+```{r}
+type = "Plasma" 
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+dat = subset(dat, clTopLevel == type)
+dat = split(dat, dat$SPECIMEN_TYPE)
+
+Analysis = function(obj){
+  obj = split(obj, obj$clFull)
+  mean_value = lapply(obj, function(x){x = mean(x$rmps_score)})
+  sd_value = lapply(obj, function(x){x = sd(x$rmps_score)})
+  n_sum = lapply(obj, function(x){x = nrow(x)})
+  n_sum_total = sum(unlist(n_sum))
+  component = lapply(n_sum, function(x){x = x/n_sum_total*100})
+  out = data.frame(cell = names(obj), 
+                   mean_rmps = round(unlist(mean_value),3),
+                   sd = paste("±", round(unlist(sd_value),3), sep = ""),
+                   component = round(unlist(component),3))
+  return(out)
+}
+
+res = lapply(dat, Analysis)
+res = do.call(rbind, res)
+res$Type = stringr::str_split(row.names(res), "[.]", simplify = T)[,1]
+write.table(res, file = paste("05.rmps_scSeq/enrich", type, "tumor_normal.xls", sep = "_"),
+      row.names = F, sep = "\t")
+saveRDS(res, file = paste("05.rmps_scSeq/summ", type,"N_T.rds", sep = ""))
+```
+
+## violin plot: Epi
+```{r}
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))(11)
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+summ = readRDS("05.rmps_scSeq/summ_epi_N_T.rds")
+df = subset(dat, SPECIMEN_TYPE == "N" & clTopLevel == "Epi")
+N_summ = subset(summ, Type == "N")
+p1 = df %>%
+  ggplot(., aes(x = clFull, y = rmps_score)) + 
+  geom_violin(aes(fill = clFull)) +
+  geom_point(data = N_summ,
+             mapping = aes(x = cell, y = mean_rmps),
+             color="black") +
+  geom_line(data = N_summ, 
+            mapping = aes(x = cell, y = mean_rmps),
+            color="black", group=1)+
+  theme_classic() +
+  ylab("Enrichment score") +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))+
+  scale_fill_manual(values = rev(getPalette)) 
+
+T_summ = subset(summ, Type == "T")
+df = subset(dat, SPECIMEN_TYPE == "T" & clTopLevel == "Epi")
+p2 = df %>% 
+  ggplot(., aes(x = clFull, y = rmps_score)) +
+  geom_violin(aes(fill = clFull)) +
+  geom_point(data = N_summ,
+             mapping = aes(x = cell, y = mean_rmps),
+             color="black") +
+  geom_line(data = N_summ, 
+            mapping = aes(x = cell, y = mean_rmps),
+            color="black", group=1)+  theme_classic() +
+  ylab("Enrichment score") +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))+
+  scale_fill_manual(values = rev(getPalette)) 
+p = (p1 / p2)
+ggsave(p, filename = "05.rmps_scSeq/sc_enrichment_violin_Epi.pdf", width = 5, height = 7)
+```
+
+# Analysis: Gene Set Enrichment: Normal Vs MMR Vs MMd
+## kruskal.test
+```{r}
+library(ggpubr)
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+dat = split(dat, dat$clFull)
+
+ReshapeDat = function(subdat){
+  # subdat = dat$`cS25 (Fibro CCL8+)`
+  subdat$type = subdat$MMRStatus
+  subdat$type = ifelse(subdat$SPECIMEN_TYPE == "N", "Normal", subdat$type)
+  kt.res = kruskal.test(rmps_score~type, data = subdat)
+  mean_subdat = split(subdat, subdat$type)
+  mean_subdat = lapply(mean_subdat, function(x){x = mean(x$rmps_score)})
+  mean_subdat = do.call(cbind, mean_subdat)
+  out = data.frame(mean_subdat)
+  out$pval = kt.res$p.value
+  return(out)
+}
+
+dat = lapply(dat, ReshapeDat)
+for (i in 1:length(dat)) {
+  if (dim(dat[[i]])[2]<4) {
+    dat[[i]] = data.frame(MMRd = NA, MMRp = NA, Normal = NA, pval = NA)
+  }
+}
+dat = do.call(rbind, dat)
+dat = na.omit(dat)
+dat$label = ifelse(dat$pval>=0.05, "NS", 
+                   ifelse(dat$pval>=0.01, "*",
+                    ifelse(dat$pval>=0.001, "**",
+                    ifelse(dat$pval>=0.0001, "***", "****"))))
+dat$cell = row.names(dat)
+temp_Dat = dat
+write.table(temp_Dat, file = "05.rmps_scSeq/Enrichment_Diff.xls", sep = "\t", row.names = F)
+```
+
+
+## visualiation:    kruskal.test
+B     Epi    Mast Myeloid  Plasma   Strom  TNKILC
+```{r}
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))(11)
+cols = getPalette[6]
+cell_hir = data.frame(hir1 = metaIn$clTopLevel,
+                      hir2 = metaIn$clMidway,
+                      hir3 = metaIn$clFull)
+cell_hir = cell_hir[!duplicated(cell_hir$hir3),]
+cell_hir = subset(cell_hir, hir1 == "Strom")
+dat = subset(temp_Dat, cell %in% cell_hir$hir3)
+dat = split(dat, dat$cell)
+
+Draw = function(subdat){
+  # subdat = dat$`cB1 (B IGD+IgM+)`
+  input = reshape2::melt(subdat)[1:3,c(3,4)]
+  colnames(input) = c("type", "value")
+  input$type = factor(input$type, levels = c("Normal", "MMRp", "MMRd"))
+  
+  p = ggplot(input, aes(x=type, y=value, group=1)) + 
+    geom_line(color = cols, linewidth = 2, alpha = 0.8) +
+    geom_point(color = cols, size = 3, alpha = 0.8) +
+    theme_classic() +
+    ylab(subdat$cell[1])+
+    theme(axis.title.x = element_blank()) +
+    geom_text(label = subdat$label[1], size = 6) +
+    theme(panel.grid=element_blank())+
+     theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))
+  return(p)
+}
+
+p.res = lapply(dat, Draw)
+p.out = patchwork::wrap_plots(p.res, 
+                    nrow = floor(nrow(cell_hir)/8), ncol = 8)
+ggsave(p.out, filename = "05.scSeq/Enricnment_Strom.pdf", width = 1.6*8, height = 1.8*4)
+```
+
+## Analysis: rmps_enrich_type
+"Epi"     "TNKILC"  "Strom"   "Myeloid" "B"       "Mast"    "Plasma"
+```{r}
+type = "Plasma" 
+dat = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+dat = subset(dat, clTopLevel == type)
+dat$type = dat$MMRStatus
+dat$type = ifelse(dat$SPECIMEN_TYPE == "N", "Normal", dat$type)
+dat = split(dat, dat$type)
+
+Analysis = function(obj){
+  obj = split(obj, obj$clFull)
+  mean_value = lapply(obj, function(x){x = mean(x$rmps_score)})
+  sd_value = lapply(obj, function(x){x = sd(x$rmps_score)})
+  n_sum = lapply(obj, function(x){x = nrow(x)})
+  n_sum_total = sum(unlist(n_sum))
+  component = lapply(n_sum, function(x){x = x/n_sum_total*100})
+  out = data.frame(cell = names(obj), 
+                   mean_rmps = round(unlist(mean_value),3),
+                   sd = paste("±", round(unlist(sd_value),3), sep = ""),
+                   component = round(unlist(component),3))
+  return(out)
+}
+
+res = lapply(dat, Analysis)
+res = do.call(rbind, res)
+res$Type = stringr::str_split(row.names(res), "[.]", simplify = T)[,1]
+write.table(res, file = paste("05.rmps_scSeq/enrich", type, "N_T_MMR.xls", sep = "_"),
+      row.names = F, sep = "\t")
+saveRDS(res, file = paste("05.rmps_scSeq/summ", type,"N_T_MMR.rds", sep = ""))
+```
+
+# Analysis: DEGs:MMRd vs MMRp
+```{r}
+library(limma)
+library(Seurat)
+rmps_sc = readRDS("01.datatidy/scRMP.rds")
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+metaIn = rmps_sc@meta.data
+metaIn$type = ifelse(metaIn$SPECIMEN_TYPE == "N", "Normal", 
+                      metaIn$MMRStatus)
+
+metaIn = split(metaIn, metaIn$clFull)
+
+res = list()
+for (i in 1:length(metaIn)) {
+  # dat = metaIn$`cB1 (B IGD+IgM+)`
+  dat = metaIn[[i]]
+  if ("MMRp" %in% unique(dat$type) & "MMRd" %in% unique(dat$type)) {
+      normal_id = row.names(dat)[dat$type == "Normal"]
+      MMRp_id = row.names(dat)[dat$type == "MMRp"]
+      MMRd_id = row.names(dat)[dat$type == "MMRd"]
+      datNormal = as.data.frame(rmps_sc@assays$RNA@counts[,normal_id])
+      datMMRp = as.data.frame(rmps_sc@assays$RNA@counts[,MMRp_id])
+      datMMRd = as.data.frame(rmps_sc@assays$RNA@counts[,MMRd_id])
+      
+      datMMRp_vs_datMMRd = LimmaDeg(datMMRp, datMMRd)
+      datMMRp_vs_datMMRd$cell = names(metaIn)[i]
+      datMMRp_vs_datMMRd$gene = row.names(datMMRp_vs_datMMRd)
+      res[[i]] = datMMRp_vs_datMMRd
+  }
+
+}
+res = do.call(rbind, res)
+write.table(res, file = "05.rmps_scSeq/MMRp_MMRd.xls", sep = "\t", row.names = F)
+saveRDS(res, file = "05.rmps_scSeq/DEG_cell_res.rds")
+```
+
+## visualization
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+# colors = c("#bebada",
+#            "#80b1d3",
+#            "#8dd3c7",
+#            # "#ffffb3",
+#            "#fdb462",
+#            "#fb8072")
+colors = brewer.pal(10, "PuOr")
+
+dat = subset(res, adj.P.Val<0.05 & abs(logFC)>0.2)
+# dat = subset(res, adj.P.Val<0.05)
+p = ggplot(dat, aes(x = cell, y = gene, size = -log10(adj.P.Val), color = logFC)) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45)) +
+  scale_colour_gradientn(colours = colorRampPalette(rev(colors))(100)) +
+  theme()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.y = element_text(face = "italic")) +
+  theme(axis.title = element_blank()) 
+# +
+  # theme(legend.position = "bottom")
+ggsave(p, filename = "05.rmps_scSeq/MMRd_MMRp_DERmps.pdf", width = 5, height = 8)
+```

@@ -1,0 +1,125 @@
+# Extract cxcl13 pro data
+```{r}
+## load data
+scMMR = readRDS("01.datatidy/sc_MMR.rds")
+rmps_score = readRDS("05.rmps_scSeq/rmp_enrich_meta.rds")
+sc_Ann = data.table::fread("01.datatidy/scAnn.txt", header = F)
+colnames(sc_Ann) = c("symbol", "ensg")
+sc_Ann$ensg = stringr::str_split(sc_Ann$ensg, "_", simplify = T)[,1]
+
+## convert name
+convertRownames <- function(seu_object, scAnn) {
+  new_rownames <- sc_Ann$symbol[match(rownames(seu_object), sc_Ann$ensg)]
+  rownames(seu_object@assays$RNA@counts) <- new_rownames
+  rownames(seu_object@assays$RNA@data) <- new_rownames
+  return(seu_object)
+}
+scMMR = convertRownames(seu_object = scMMR, scAnn = sc_Ann)
+
+rmps_score = split(rmps_score, rmps_score$PatientTypeID)
+TidySc = function(subdat){
+  # subdat = rmps_score$C103_T
+  subexp = as.matrix(scMMR@assays$RNA@counts[,subdat$sampleID])
+  subexp = apply(subexp, 1, sum)
+  subdat = split(subdat, subdat$clFull)
+  CT13 = mean(subdat$`cTNI16 (CD8+ CXCL13+ prolif)`$rmps_score)
+  E1 = mean(subdat$`cE01 (Stem/TA-like)`$rmps_score)
+  E3 = mean(subdat$`cE03 (Stem/TA-like prolif)`$rmps_score)
+  out = list(exp = subexp, SErmps = data.frame(CT13 = CT13,
+                                               E1 = E1, E3 = E3))
+  return(out)
+}
+scTidy = lapply(rmps_score, TidySc)
+saveRDS(scTidy, file = "08.rmps_immune/scTidy_CT13.rds")
+```
+
+```{r}
+ImmuneData = readRDS("01.datatidy/ImmExpData.rds")
+scTidy = readRDS("08.rmps_immune/scTidy_CT13.rds")
+sc_exp = lapply(scTidy, function(x){x = x$exp})
+sc_exp = do.call(cbind, sc_exp)
+choseExp = ImmuneData$IMVigor
+
+scSEscore = lapply(scTidy, function(x){x = x$SErmps})
+scSEscore = do.call(rbind, scSEscore)
+scSEscore$Type = stringr::str_split(row.names(scSEscore), "_", simplify = T)[,2]
+scSEscore = subset(scSEscore, Type != "N")
+
+samGene = intersect(row.names(sc_exp), row.names(choseExp))
+sc_exp = sc_exp[samGene, row.names(scSEscore)]
+choseExp = choseExp[samGene, ]
+
+sc_exp = apply(sc_exp, 2, rank)
+choseExp = apply(choseExp, 2, rank)
+write.csv(sc_exp, file = "08.rmps_immune/sc_exp_IMVigor.csv")
+write.csv(choseExp, file = "08.rmps_immune/IMVigor_exp.csv")
+write.csv(scSEscore, file = "08.rmps_immune/scSEscore.csv")
+```
+
+# Analysis:RMPs & Immune Response
+## IMvigor cohort
+```{r}
+ImmDataset = readRDS("01.datatidy/ImmDataset.rds")
+IMvigorRMPs = data.table::fread("08.rmps_immune/IMVigor_score.csv")
+IMvigorRMPs = IMvigorRMPs[-1, -1]
+colnames(IMvigorRMPs) = c("CT13", "E1", "E3")
+IMvigorRMPs$V1 = colnames(ImmDataset$exp$IMVigor)[-1]
+IMvigorRMPs = left_join(IMvigorRMPs, ImmDataset$phe$IMVigor, by = "V1")
+```
+
+## RMscore & response
+```{r}
+library(ggplot2)
+library(ggpubr)
+IMdat = IMvigorRMPs
+dat = data.frame(RMscore = IMdat$E3, 
+                 class = IMdat$binaryResponse)
+dat = na.omit(dat)
+dat = subset(dat, class != "NE")
+ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.2, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.1)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  # scale_color_manual(values = c("cluster1" = "#88419d", 
+  #                              "cluster2" = "#ec7014")) +  
+  stat_compare_means(label = "p.signif") +
+  theme(legend.position = "top")
+```
+## RMscore & survival
+```{r}
+dat = data.frame(os = IMdat$censOS, 
+                 os.time = IMdat$os,
+                 class = ifelse(IMdat$E1 > median(IMdat$E1),
+                                "High", "Low"))
+dat = na.omit(dat)
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+```
+
+## RMscore & Mutaion/neoantigen
+```{r}
+dat = data.frame(RMscore = IMdat$RMscore, item = IMdat$`Neoantigen burden per MB`)
+dat = na.omit(dat)
+
+ggplot(dat, aes(x=item, y=RMscore)) + 
+  geom_point()+
+  geom_smooth(method=lm, se=FALSE) +
+  theme_classic() + 
+  stat_cor(method = "pearson")
+```
+
+

@@ -1,0 +1,244 @@
+# 1.GEO data
+## getExpMatrix
+```{r}
+phe = data.table::fread("_rawmeta/meta.txt")
+GSE = unique(phe$GSE)
+GSE = as.list(GSE)
+names(GSE) = unlist(GSE)
+GSE = lapply(GSE, function(x){x = paste("_rawcel/", x, "_RAW.tar", sep = "")})
+
+# Read cel files----
+GetCelMatrix = function(tarFile){
+  # untar file
+  # tarFile = "01.download/GSE3325/GSE3325_RAW.tar"
+  # desDir = "01.download/GSE3325/"
+  desDir = stringr::str_sub(tarFile, 1, 16)
+  dir.create(desDir)
+  cmd = paste("tar -C", desDir,"-xvf",tarFile, sep = " ")
+  system(cmd)
+  
+  # gunzip file
+  # cels <- list.files("./01.download/GSE3325", pattern = "[gz]", full.names = T)
+  cels <- list.files(desDir, pattern = "[gz]", full.names = T)
+
+  for (item in cels) {
+    cmd = paste("gunzip", item, sep = " ")
+    system(cmd)
+  }
+  
+  # Read as affy data
+  library(affy)
+  # raw.data=ReadAffy(celfile.path="01.download/GSE3325/")
+  raw.data=ReadAffy(celfile.path= desDir)
+
+  Datarma=rma(raw.data)
+  eSet=exprs(Datarma)
+  return(eSet)
+}
+
+ExpMat = lapply(GSE, GetCelMatrix)
+
+# names(ExpMat) = stringr::str_sub(unlist(tarFile), 9, 16)
+saveRDS(ExpMat, file = "01.datatidy/GEOExp.rds")
+```
+
+## remove Batch Effect
+```{r}
+library("hgu133plus2.db")
+
+geo = readRDS("01.datatidy/GEOExp.rds")
+ann=toTable(hgu133plus2SYMBOL)
+
+# tidy expression matrix
+exp = do.call(cbind, geo)
+mean_val = apply(exp, 1, mean)
+exp = as.data.frame(exp)
+exp$Symbol = ann$symbol[match(row.names(exp), ann$probe_id)]
+# exp$Symbol = stringr::str_split(exp$Symbol, " ", simplify = T)[,1]
+exp = exp[order(mean_val, decreasing = T),]
+exp = exp[!duplicated(exp$Symbol), ]
+exp = na.omit(exp)
+row.names(exp) = NULL
+exp = tibble::column_to_rownames(exp, var = "Symbol")
+colnames(exp) = stringr::str_split(colnames(exp), "_", simplify = T)[,1]
+colnames(exp) = stringr::str_split(colnames(exp), "[.]", simplify = T)[,1]
+
+# remain tumor sample
+meta = data.table::fread("_rawmeta/meta.txt")
+phe = subset(meta, sample.type == "T")
+phe = as.data.frame(phe)
+row.names(phe) = phe$GSM
+sam = intersect(row.names(phe), colnames(exp))
+phe = phe[sam,]
+exp = exp[,sam]
+
+## visualization: before batch effect
+before_pca = prcomp(t(exp), center = TRUE, scale. = TRUE)
+dat = as.data.frame(before_pca$x[,1:2])
+dat$GSE = phe$GSE
+
+library(ggplot2)
+p = ggplot(dat, aes(x = PC1, y = PC2, color = GSE)) +
+        geom_point(size = 1, alpha = 0.8) +
+        theme_bw() + 
+        theme(panel.grid=element_blank())
+ggsave(p, filename = "01.datatidy/GEO_before_batch.pdf", width = 5, height = 3.8)
+
+## remove batch effect
+exp_batch<-sva::ComBat(dat=exp, batch=phe$GSE)
+GEO_afterBatch = list(exp = exp_batch, phe = phe)
+saveRDS(GEO_afterBatch, file = "01.datatidy/GEO_afterBatch.rds")
+
+## visualization: after batch effect
+after_pca = prcomp(t(exp_batch), center = TRUE, scale. = TRUE)
+dat = as.data.frame(after_pca$x[,1:2])
+dat$GSE = phe$GSE
+
+library(ggplot2)
+p = ggplot(dat, aes(x = PC1, y = PC2, color = GSE)) +
+        geom_point(size = 1, alpha = 0.8) +
+        theme_bw() + 
+        theme(panel.grid=element_blank())
+ggsave(p, filename = "01.datatidy/GEO_after_batch.pdf", width = 5, height = 3.8)
+```
+
+# 2.CRLM:cetuximab
+```{r}
+GSE5851_exp = data.table::fread("_rawdata/GSE5851/exp.txt")
+GSE5851_ann = data.table::fread("_rawdata/GSE5851/ann.txt")
+GSE5851_phe = data.table::fread("_rawdata/GSE5851/phe.txt", header = F)
+
+GSE5851_exp$ID_REF = GSE5851_ann$`Gene Symbol`[match(GSE5851_exp$ID_REF, GSE5851_ann$ID)]
+GSE5851_exp$ID_REF = stringr::str_split(GSE5851_exp$ID_REF, " ", simplify = T)[,1]
+mean_val = apply(GSE5851_exp[,2:ncol(GSE5851_exp)], 1, mean)
+GSE5851_exp = GSE5851_exp[order(mean_val, decreasing = T),]
+GSE5851_exp = GSE5851_exp[!duplicated(GSE5851_exp$ID_REF),]
+row.names(GSE5851_exp) = NULL
+GSE5851_exp = tibble::column_to_rownames(GSE5851_exp, var = "ID_REF")
+
+GEO_drug = list(GSE5851 = list(exp = GSE5851_exp, phe = GSE5851_phe))
+saveRDS(GEO_drug, file = "01.datatidy/GEO_drug.rds")
+```
+
+# 3.spatial data
+```{r}
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+ST_dir = list.dirs("_STsec/CanDis/ST/", recursive = F)
+ST_dir = as.list(ST_dir)
+ST_data = lapply(ST_dir, Load10X_Spatial)
+saveRDS(ST_data, file = "01.datatidy/ST_data.rds")
+```
+
+# 4.scSeq data
+```{r}
+library("SeuratDisk")
+sc_MMR <- LoadH5Seurat("_STsec/Colon_MMR/crcAtlasDefault.h5seurat")
+saveRDS(sc_MMR, file = "01.datatidy/sc_MMR.rds")
+```
+
+# 5.tcga data
+## phe data
+```{r}
+phe = data.table::fread("_tcgapan/GDC-PANCAN.basic_phenotype.tsv.gz")
+sur = data.table::fread("_tcgapan/GDC-PANCAN.survival.tsv")
+tcga_phe = list(phe=phe, sur=sur)
+saveRDS(tcga_phe, file = "01.datatidy/tcga_phe.rds")
+```
+
+## mutation data
+```{r}
+mut = data.table::fread("_tcgapan/mc3.v0.2.8.PUBLIC.xena.gz")
+saveRDS(mut, file = "01.datatidy/mut.rds")
+```
+
+## cnv data
+```{r}
+cnv = data.table::fread("_tcgapan/GDC-PANCAN.gistic.tsv.gz")
+map = data.table::fread("_tcgapan/gencode.v22.annotation.gene.probeMap")
+cnv$V1 = map$gene[match(cnv$V1, map$id)]
+saveRDS(cnv, file = "01.datatidy/cnv.rds")
+```
+
+## expression data
+```{r}
+gene_ann = data.table::fread("_tcgapan/gencode.v22.annotation.gene.probeMap")
+exp = data.table::fread("_tcgapan/GDC-PANCAN.htseq_fpkm-uq.tsv.gz")
+exp$xena_sample = gene_ann$gene[match(exp$xena_sample, gene_ann$id)]
+RMP_exp = subset(exp, xena_sample %in% rmps$Symbol)
+RMP_exp = tibble::column_to_rownames(RMP_exp, var = "xena_sample")
+RMP_exp = t(RMP_exp)
+saveRDS(exp, file = "01.datatidy/pan_exp.rds")
+saveRDS(RMP_exp, file = "01.datatidy/RMP_exp.rds")
+```
+
+## ptmb data
+```{r}
+ptmb = data.table::fread("_rawmeta/pTMB.txt")
+saveRDS(ptmb, file = "01.datatidy/ptmb.rds")
+```
+
+# 6.rmps data
+```{r}
+rmps = data.table::fread("_rawmeta/RMPs.txt")
+saveRDS(rmps, file = "01.datatidy/rmps.rds")
+```
+
+# 7.Immune Therapy
+```{r}
+# Read expression data----
+exp = list.files("_immune_therapy/02.ImmTherapy/", pattern = "*.Rds", full.names = T)
+name = stringr::str_split(exp, "/", simplify = T)[,4]
+name = stringr::str_split(name, "[.]", simplify = T)[,1]
+exp = as.list(exp)
+names(exp) = name
+
+exp = lapply(exp, function(x){x=readRDS(x)})
+
+# Read dataset information-----
+phe = data.table::fread("_immune_therapy/02.ImmTherapy/Immunotherapy_Datasets.txt")
+
+# Read clinical information-----
+cli = list.files("_immune_therapy/02.ImmTherapy/", pattern = "*.tsv", full.names = T)
+name = stringr::str_split(cli, "/", simplify = T)[,4]
+name = stringr::str_split(name, "[.]", simplify = T)[,1]
+cli = as.list(cli)
+names(cli) = name
+cli = lapply(cli, function(x){x=data.table::fread(x)})
+```
+```{r}
+IMvigorExp = data.table::fread("_immune_therapy/02.ImmTherapy/IMVigor/Exp.txt")
+ann = data.table::fread("_immune_therapy/02.ImmTherapy/IMVigor/Ann.txt")
+IMvigorExp$V1 = ann$symbol[match(IMvigorExp$V1, ann$V1)]
+IMvigorPhe = data.table::fread("_immune_therapy/02.ImmTherapy/IMVigor/Phe.txt")
+exp$IMVigor = IMvigorExp
+cli$IMVigor = IMvigorPhe
+ImmDataset = list(exp = exp, phe = cli)
+saveRDS(ImmDataset, file = "01.datatidy/ImmDataset.rds")
+```
+
+```{r}
+expData = ImmDataset$exp
+colnames(expData$IMVigor)[1] = "GENE_SYMBOL"
+
+dat = expData$`GBM-PRJNA482620`
+
+TidyExp = function(dat){
+  expDat = apply(dat[, 2:ncol(dat)], 2, as.numeric) %>% data.frame()
+  mean_value = apply(expDat, 1, mean)
+  expDat$Gene = dat$GENE_SYMBOL
+  expDat = expDat[order(mean_value, decreasing = T),]
+  expDat = expDat[!duplicated(expDat$Gene),]
+  expDat = na.omit(expDat)
+  row.names(expDat) = NULL
+  expDat = tibble::column_to_rownames(expDat, var = "Gene")
+  return(expDat)
+}
+
+expData = lapply(expData, TidyExp)
+saveRDS(expData, file = "01.datatidy/ImmExpData.rds")
+```
+

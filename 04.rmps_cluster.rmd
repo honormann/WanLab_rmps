@@ -1,0 +1,794 @@
+# Analysis: Unicox
+## Unicox:GEO
+```{r}
+dir.create("04.rmps_cluster")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+
+## mapping data
+rmps$Symbol[!rmps$Symbol %in% row.names(geo$exp)]
+row.names(geo$exp)[which(row.names(geo$exp) == "BUD23")] = "WBSCR22"
+row.names(geo$exp)[which(row.names(geo$exp) == "MRM2")] = "FTSJ2"
+row.names(geo$exp)[which(row.names(geo$exp) == "MRM3") ]= "RNMTL1"
+rmps$Symbol[!rmps$Symbol %in% row.names(geo$exp)]
+
+phe = geo$phe
+sur = data.frame(os = phe$os.event, os.time = phe$os.time, id = phe$GSM) %>% 
+  na.omit() %>% 
+  subset(id %in% colnames(geo$exp))
+
+exp = geo$exp[intersect(rmps$Symbol, row.names(geo$exp)), sur$id] %>%
+  t() %>%
+  data.frame()
+
+## unicox test
+library(survival)
+library(survminer)
+subExp = as.list(exp)
+
+uniCoxT = function(dat){
+  dat = data.frame(os = sur$os, os.time = sur$os.time, 
+                 gene = dat)
+  res.cox <- coxph(Surv(os.time, os) ~ gene, data = dat)
+  res.cox <- summary(res.cox)
+  p.value<-signif(res.cox$wald["pvalue"], digits=3)
+  HR <-signif(res.cox$coef[2], digits=3)
+  HR.confint.lower <- signif(res.cox$conf.int[,"lower .95"], 3)
+  HR.confint.upper <- signif(res.cox$conf.int[,"upper .95"], 3)
+  out = data.frame(pval = p.value, HR = HR, HR.up = HR.confint.upper,
+                   HR.low = HR.confint.lower)
+  return(out)
+}
+
+uni.res = lapply(subExp, uniCoxT)
+uni.res = do.call(rbind, uni.res)
+saveRDS(uni.res, file = "04.rmps_cluster/geo_uni.rds")
+
+uni.res$gene = row.names(uni.res)
+write.table(uni.res, file = "04.rmps_cluster/geo_unicox.xls", sep = "\t", row.names = F)
+
+# visualization
+uni.res$gene = fct_rev(uni.res$gene)
+uni.res$type = ifelse(uni.res$HR>1, "bad", "good")
+uni.res$type = ifelse(uni.res$pval<0.05, uni.res$type, "non")
+
+ggplot(dat = uni.res, aes(y = gene, color = type)) + 
+  theme_classic() +
+  geom_point(aes(x=HR), shape=15, size=3)+
+  geom_linerange(aes(xmin=HR.low, xmax=HR.up), linewidth = 1) +
+  geom_vline(xintercept = 1, linetype="dashed") +
+  labs(x="Hazard Ratio", y="") +
+  coord_cartesian(xlim=c(0.5, 1.5))+ 
+  theme(axis.line.y = element_blank(),
+        axis.ticks.y= element_blank(),
+        axis.text.y= element_blank(),
+        axis.title.y= element_blank()) +
+  scale_color_manual(values = c(`good` = "#238b45",
+                                `bad` = "#e41a1c",
+                                `non` = "#737373")) +
+  theme(legend.position = "none")-> p_mid
+
+uni.res$label = paste(uni.res$HR, "(", uni.res$HR.low, "-", uni.res$HR.up, ")", sep = "")
+ggplot(dat = uni.res, aes(y = gene)) +
+  geom_text(aes(x = 0, label = gene), hjust = 0, fontface = "italic")+
+  geom_text(
+    aes(x = 1, label = label),
+    hjust = 0,
+    fontface = ifelse(uni.res$label == "Hazard Ratio (95% CI)", "bold", "plain")
+  )+
+  theme_void() +
+  coord_cartesian(xlim = c(0, 4)) -> p_left
+
+
+ggplot(dat = uni.res) +
+geom_text(
+  aes(x = 0, y = gene, label = pval),
+  hjust = 0,
+  fontface = ifelse(uni.res$pval == "p-value", "bold", "plain")
+) +
+theme_void() -> p_right
+
+library(patchwork)
+layout <- c(
+  area(t = 0, l = 0, b = 47, r = 3), 
+  area(t = 0, l = 4, b = 47, r = 4), 
+  area(t = 0, l = 5, b = 47, r = 9) 
+)
+# final plot arrangement
+plot(layout)
+out = p_left + p_mid + p_right + plot_layout(design = layout)
+ggsave(out, filename = "04.rmps_cluster/unicox_geo.pdf", width = 12, height = 7)
+```
+
+## Unicox:TCGA
+```{r}
+rmpExp = readRDS("01.datatidy/RMP_exp.rds")
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+
+library(dplyr)
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) == "01A") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+
+crcSur = tcga_phe$sur %>% 
+  subset(sample %in% crcPhe$sample) %>%
+  left_join(crcPhe, by = "sample") %>%
+  subset(sample %in% row.names(rmpExp))
+
+crcExp = rmpExp[crcSur$sample,] %>% data.frame()
+
+subExp = as.list(crcExp)
+
+uniCoxT = function(dat){
+  dat = data.frame(os = crcSur$OS, os.time = crcSur$OS.time, 
+                 gene = dat)
+  res.cox <- coxph(Surv(os.time, os) ~ gene, data = dat)
+  res.cox <- summary(res.cox)
+  p.value<-signif(res.cox$wald["pvalue"], digits=3)
+  HR <-signif(res.cox$coef[2], digits=3)
+  HR.confint.lower <- signif(res.cox$conf.int[,"lower .95"], 3)
+  HR.confint.upper <- signif(res.cox$conf.int[,"upper .95"], 3)
+  out = data.frame(pval = p.value, HR = HR, HR.up = HR.confint.upper,
+                   HR.low = HR.confint.lower)
+  return(out)
+}
+
+uni.res = lapply(subExp, uniCoxT)
+uni.res = do.call(rbind, uni.res)
+saveRDS(uni.res, file = "04.rmps_cluster/tcga_uni.rds")
+
+uni.res$gene = row.names(uni.res)
+write.table(uni.res, file = "04.rmps_cluster/tcga_unicox.xls", sep = "\t", row.names = F)
+
+uni.res$gene = fct_rev(uni.res$gene)
+uni.res$type = ifelse(uni.res$HR>1, "bad", "good")
+uni.res$type = ifelse(uni.res$pval<0.05, uni.res$type, "non")
+
+ggplot(dat = uni.res, aes(y = gene, color = type)) + 
+  theme_classic() +
+  geom_point(aes(x=HR), shape=15, size=3)+
+  geom_linerange(aes(xmin=HR.low, xmax=HR.up), linewidth = 1) +
+  geom_vline(xintercept = 1, linetype="dashed") +
+  labs(x="Hazard Ratio", y="") +
+  coord_cartesian(xlim=c(0.5, 1.5))+ 
+  theme(axis.line.y = element_blank(),
+        axis.ticks.y= element_blank(),
+        axis.text.y= element_blank(),
+        axis.title.y= element_blank()) +
+  scale_color_manual(values = c(`good` = "#238b45",
+                                `bad` = "#e41a1c",
+                                `non` = "#737373")) +
+  theme(legend.position = "none")-> p_mid
+
+uni.res$label = paste(uni.res$HR, "(", uni.res$HR.low, "-", uni.res$HR.up, ")", sep = "")
+ggplot(dat = uni.res, aes(y = gene)) +
+  geom_text(aes(x = 0, label = gene), hjust = 0, fontface = "italic")+
+  geom_text(
+    aes(x = 1, label = label),
+    hjust = 0,
+    fontface = ifelse(uni.res$label == "Hazard Ratio (95% CI)", "bold", "plain")
+  )+
+  theme_void() +
+  coord_cartesian(xlim = c(0, 4)) -> p_left
+
+
+ggplot(dat = uni.res) +
+geom_text(
+  aes(x = 0, y = gene, label = pval),
+  hjust = 0,
+  fontface = ifelse(uni.res$pval == "p-value", "bold", "plain")
+) +
+theme_void() -> p_right
+
+library(patchwork)
+layout <- c(
+  area(t = 0, l = 0, b = 47, r = 3), 
+  area(t = 0, l = 4, b = 47, r = 4), 
+  area(t = 0, l = 5, b = 47, r = 9) 
+)
+# final plot arrangement
+plot(layout)
+out = p_left + p_mid + p_right + plot_layout(design = layout)
+ggsave(out, filename = "04.rmps_cluster/unicox_tcga.pdf", width = 12, height = 7)
+```
+
+# Analysis: Consensus Cluster
+```{r}
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+
+# mapping gene
+rmps$Symbol[which(!rmps$Symbol %in% row.names(geo$exp))]
+row.names(geo$exp)[which(row.names(geo$exp) == "MRM2")] = "FTSJ2"
+row.names(geo$exp)[which(row.names(geo$exp) == "BUD23")] = "WBSCR22"
+row.names(geo$exp)[which(row.names(geo$exp) == "MRM3") ]= "RNMTL1"
+table(!rmps$Symbol %in% row.names(geo$exp))
+
+# consensus cluster analysis
+library(ConsensusClusterPlus)
+
+dat = as.data.frame(geo$exp)
+dat = dat[rmps$Symbol,]
+dat = na.omit(dat)
+dat = sweep(dat,1, apply(dat,1,median,na.rm=T))
+
+title="04.rmps_cluster/cluster"
+results = ConsensusClusterPlus(as.matrix(dat),maxK=6,reps=50,pItem=0.8,pFeature=1,
+                               title=title,clusterAlg="hc",
+                               distance="pearson",seed=12345678,
+                               plot="png")
+saveRDS(results, file = "04.rmps_cluster/cluster.rds")
+
+# visualization
+dat = as.data.frame(geo$exp)
+dat = dat[rmps$Symbol,]
+dat = na.omit(dat)
+# dat = sweep(dat,1, apply(dat,1,median,na.rm=T))
+
+phe = geo$phe
+columnAnn = data.frame(id = colnames(dat), 
+                       clusters = as.character(results[[3]]$consensusClass),
+                       datasets = phe$GSE[match(colnames(dat), phe$GSM)])
+columnAnn = columnAnn[order(columnAnn$clusters),]
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+# define colors
+# col_fun = c("#5e3c99", "#b2abd2", "#f7f7f7", "#fdb863", "#e66101")
+col_fun = brewer.pal(5, "PuOr")
+col_fun = colorRampPalette(rev(col_fun))(100)
+
+datasets_col = colorRampPalette(brewer.pal(10, "Paired"))(12)
+names(datasets_col) = unique(columnAnn$datasets)
+
+# annotation
+column_ha = HeatmapAnnotation(Clusters = columnAnn$clusters,
+                              Datasets = columnAnn$datasets,
+               col = list(Clusters = c("1" = "#ec7014", "2" = "#88419d"
+                                       ,
+                                       "3" = "#238b45"
+                                       ),
+                          Datasets = datasets_col))
+modType = rmps$ModificationSymbol
+# modType[which(modType == "m1G:m1A") ] = "m1G"
+# modType[which(modType == "m2,2,7G")] = "m2G"
+# modType[which(modType == "m2,2G")] = "m2G"
+# modType[which(modType == "m5c")] = "m5C"
+# modType[which(modType == "m6A(?)")] = "m6A"
+# modType[which(modType == "m6A(m)(Cap)")] = "m6A"
+# modType[which(modType == "Xm(3'end)")] = "Xm"
+
+row_ha = rowAnnotation(ModType = modType)
+
+dat = dat[,columnAnn$id]
+
+scale_data = function(x){
+  # x = (x-mean(x))/sd(x)
+  # x = (x-min(x))/(max(x) - min(x))
+  x = x - mean(x)
+  x = x / max(abs(x))
+  return(x)
+}
+dat = apply(dat, 1, scale_data)
+dat = t(dat)
+
+pdf(file = "04.rmps_cluster/rmpCluster.pdf", width = 8, height = 8.5)
+Heatmap(dat, col = col_fun,
+        clustering_distance_columns  = "pearson",
+        clustering_distance_rows  = "pearson",
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        column_order = columnAnn$id,
+        show_column_names  = FALSE,
+        row_names_gp = gpar(fontface = "italic"),
+        column_split = columnAnn$clusters,
+        row_split = modType,
+        top_annotation = column_ha,
+        left_annotation = row_ha)
+dev.off()
+```
+
+# Analysis: Cluster & Survival
+```{r}
+cluster = readRDS("04.rmps_cluster/cluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+cluster = cluster[[3]]$consensusClass
+phe = geo$phe
+dat = data.frame(os = phe$os.event, os.time = phe$os.time, cluster = cluster, GSE = phe$GSE)
+dat = subset(dat, GSE == "GSE39582") # GSE39582, GSE17536
+dat = na.omit(dat)
+
+## survival analysis---------
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~cluster, 
+                data=dat)
+
+pdf(file = "04.rmps_cluster/rmpSurvial_GSE39582.pdf", width = 4, height = 5.5)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+# Analysis: Cluster & MMR
+```{r}
+cluster = readRDS("04.rmps_cluster/cluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+cluster = cluster[[3]]$consensusClass
+
+phe = geo$phe
+dat = data.frame(mmr = phe$mmr.status, cluster = as.character(cluster))
+dat = na.omit(dat)
+dat = subset(dat, mmr %in% c("dMMR",  "MSI",  "MSS", "pMMR"))
+
+library(ggplot2)
+dat$Cluster = paste("cluster", dat$cluster, sep = "")
+dat = data.frame(table(dat))
+dat = split(dat, dat$mmr)
+dat = lapply(dat, function(x){x$Percent = (x$Freq/sum(x$Freq))*100
+return(x)})
+dat = do.call(rbind, dat)
+dat$Percent = round(dat$Percent, 2)
+dat$mmr = factor(dat$mmr, levels = c("dMMR", "pMMR", "MSI", "MSS"))
+
+pdf(file = "04.rmps_cluster/rmps_MMR.pdf", width = 2, height = 3.5)
+ggplot(dat, aes(x = mmr, y = Percent, fill=Cluster)) +
+  geom_bar(position='stack', stat='identity') + 
+  theme_classic() + 
+  theme(panel.grid=element_blank()) +
+  ylab("Precent(100%)") +
+  scale_fill_manual(values = c("cluster1" = "#ec7014",
+                               "cluster2" = "#88419d",
+                               "cluster3" = "#238b45"))+
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  theme(legend.position = "top")
+dev.off()
+```
+
+# Analysis: Cluster & CMS analysis
+## calculate CMS subtype
+```{r}
+phe = geo$phe
+emat = geo$exp
+CMS.res = CMScaller::CMScaller(emat, templates = CMScaller::templates.CMS,
+                    rowNames = "symbol")
+saveRDS(CMS.res, file = "01.datatidy/geoCMS.rds")
+```
+
+## Visualization
+```{r}
+cluster = readRDS("04.rmps_cluster/cluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+cluster = cluster[[3]]$consensusClass
+
+CMS.res = readRDS("01.datatidy/geoCMS.rds")
+dat = data.frame(CMS = CMS.res$prediction, 
+                 cluster = as.character(cluster))
+dat = na.omit(dat)
+
+dat$Cluster = paste("cluster", dat$cluster, sep = "")
+dat = data.frame(table(dat))
+dat = split(dat, dat$CMS)
+dat = lapply(dat, function(x){x$Percent = (x$Freq/sum(x$Freq))*100
+return(x)})
+dat = do.call(rbind, dat)
+dat$Percent = round(dat$Percent, 2)
+dat$CMS = factor(dat$CMS, levels = c("CMS1", "CMS2", "CMS3", "CMS4"))
+
+pdf(file = "04.rmps_cluster/rmps_CMS.pdf", width = 2, height = 3.5)
+ggplot(dat, aes(x = CMS, y = Percent, fill=Cluster)) +
+  geom_bar(position='stack', stat='identity') + 
+  theme_classic() + 
+  theme(panel.grid=element_blank()) +
+  ylab("Precent(100%)") +
+  scale_fill_manual(values = c("cluster1" = "#ec7014",
+                               "cluster2" = "#88419d",
+                               "cluster3" = "#238b45"))+
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  theme(legend.position = "top")
+dev.off()
+```
+# Analysis: Cluster & TME
+## calculate TME signature → ssGSEA
+```{r}
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+exprMatrix = geo$exp
+sets = data.table::fread("04.rmps_cluster/TME.txt")
+sets = split(sets$Symbol, sets$Signature)
+gsva_TME <- GSVA::gsva(as.matrix(exprMatrix), sets,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+saveRDS(gsva_TME, file = "04.rmps_cluster/geo_gsvaTME.rds")
+```
+
+## DE analysis
+```{r}
+library(limma)
+gsva_TME = readRDS("04.rmps_cluster/geo_gsvaTME.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+clusters = clusters[[3]]$consensusClass
+
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+cluster1 = gsva_TME[,clusters == 1]
+cluster2 = gsva_TME[,clusters == 2]
+cluster3 = gsva_TME[,clusters == 3]
+
+cluster1_vs_cluster2 = LimmaDeg(cluster1, cluster2)
+cluster1_vs_cluster2$Type = "cluster1_vs_cluster2"
+cluster2_vs_cluster3 = LimmaDeg(cluster2, cluster3)
+cluster2_vs_cluster3$Type = "cluster2_vs_cluster3"
+cluster1_vs_cluster3 = LimmaDeg(cluster1, cluster3)
+cluster1_vs_cluster3$Type = "cluster1_vs_cluster3"
+out = rbind(cluster1_vs_cluster2, cluster2_vs_cluster3,
+            cluster1_vs_cluster3)
+out$signature = c(row.names(cluster1_vs_cluster2),
+                  row.names(cluster2_vs_cluster3),
+                  row.names(cluster1_vs_cluster3))
+write.table(out, file = "04.rmps_cluster/DETME_cluster.xls", sep = "\t", row.names = F)
+```
+
+```{r}
+cluster1_up_1 = row.names(subset(cluster1_vs_cluster2, adj.P.Val<0.05 & logFC>0))
+cluster1_up_2 = row.names(subset(cluster1_vs_cluster3, adj.P.Val<0.05 & logFC>0))
+cluster1_up = intersect(cluster1_up_1, cluster1_up_2)
+
+cluster2_up_1 = row.names(subset(cluster1_vs_cluster2, adj.P.Val<0.05 & logFC<0))
+cluster2_up_2 = row.names(subset(cluster2_vs_cluster3, adj.P.Val<0.05 & logFC>0))
+cluster2_up = intersect(cluster2_up_1, cluster2_up_2)
+
+cluster3_up_1 = row.names(subset(cluster1_vs_cluster3, adj.P.Val<0.05 & logFC<0))
+cluster3_up_2 = row.names(subset(cluster2_vs_cluster3, adj.P.Val<0.05 & logFC<0))
+cluster3_up = intersect(cluster3_up_1, cluster3_up_2)
+```
+
+## visualization
+```{r}
+gsva_TME = readRDS("04.rmps_cluster/geo_gsvaTME.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+dat = gsva_TME%>% data.frame()
+
+scale_data = function(x){
+  # x = (x-mean(x))/sd(x)
+  # x = (x-min(x))/(max(x) - min(x))
+  x = x - mean(x)  
+  x = x / max(abs(x))
+  return(x)
+}
+dat = apply(dat, 1, scale_data)
+dat = t(dat)
+
+Cluster = readRDS("04.rmps_cluster/cluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+sets = data.table::fread("04.rmps_cluster/TME.txt")
+
+columnAnn = data.frame(id = colnames(dat), 
+                       clusters = as.character(Cluster[[3]]$consensusClass),
+                       datasets = phe$GSE[match(colnames(dat), phe$GSM)])
+# columnAnn = columnAnn[order(columnAnn$clusters),]
+rowAnn = data.frame(Sig = row.names(dat), 
+                    type = sets$Function[match(row.names(dat), sets$Signature)])
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+# define colors
+# col_fun = c("#756bb1", "#fd8d3c", "#de2d26")
+col_fun = brewer.pal(5, "PuOr")
+col_fun = colorRampPalette(rev(col_fun))(100)
+# col_fun = colorRampPalette(col_fun)(100)
+
+datasets_col = colorRampPalette(brewer.pal(10, "Paired"))(12)
+names(datasets_col) = unique(columnAnn$datasets)
+
+# annotation
+column_ha = HeatmapAnnotation(Clusters = columnAnn$clusters,
+                              Datasets = columnAnn$datasets,
+                              col = list(Clusters = c("1" = "#ec7014", 
+                                                      "2" = "#88419d", 
+                                                      "3" = "#238b45"),
+                                         Datasets = datasets_col))
+
+row_ha = rowAnnotation(Type = rowAnn$type,
+                       col = list(
+                       Type = c("Angiogenesis_Fibrosis" = "#ec7014",
+                                "Anti_Tumor_Micorenvironment" = "#88419d",
+                                "Malignant_Cell_Properties" = "#238b45",
+                                "Pro_Tumor_Microenvironment" = "#e7298a")
+                       ))
+
+
+dat = dat[rowAnn$Sig,columnAnn$id]
+
+rowPath = split(rowAnn$Sig, rowAnn$type)
+
+rowType = rowAnn$type
+  
+pdf(file = "04.rmps_cluster/rmps_TME_heatmap.pdf", width = 10, height = 5.5)
+Heatmap(dat, col = col_fun,
+        clustering_distance_columns  = "pearson",
+        clustering_distance_rows  = "pearson",
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        # column_order = columnAnn$id,
+        show_column_names  = FALSE,
+        show_row_names = TRUE,
+        # row_names_gp = gpar(fontface = "italic"),
+        top_annotation = column_ha,
+        column_split = columnAnn$clusters,
+        row_split = rowType,
+        left_annotation = row_ha,
+        # right_annotation = 
+        # rowAnnotation(textbox = anno_textbox(rowType, rowPath,
+        #                                      gp = gpar(fontsize = 12)))
+        )
+dev.off()
+```
+
+# Analysis: Cluster & Cibersort analysis
+## Calculate → cibersort
+```{r}
+source("04.rmps_cluster/CIBERSORT.R")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+Exp = geo$exp
+results = CIBERSORT("04.rmps_cluster/ref.txt", Exp, perm=100, QN=TRUE)
+saveRDS(results, file = "04.rmps_cluster/geo_cibersort.rds")
+```
+
+## DE analysis
+```{r}
+library(limma)
+results = readRDS("04.rmps_cluster/geo_cibersort.rds")
+results = t(results[,1:22])
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+clusters = clusters[[3]]$consensusClass
+
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+cluster1 = results[,clusters == 1]
+cluster2 = results[,clusters == 2]
+cluster3 = results[,clusters == 3]
+
+cluster1_vs_cluster2 = LimmaDeg(cluster1, cluster2)
+cluster1_vs_cluster2$Type = "cluster1_vs_cluster2"
+cluster2_vs_cluster3 = LimmaDeg(cluster2, cluster3)
+cluster2_vs_cluster3$Type = "cluster2_vs_cluster3"
+cluster1_vs_cluster3 = LimmaDeg(cluster1, cluster3)
+cluster1_vs_cluster3$Type = "cluster1_vs_cluster3"
+out = rbind(cluster1_vs_cluster2, cluster2_vs_cluster3,
+            cluster1_vs_cluster3)
+out$signature = c(row.names(cluster1_vs_cluster2),
+                  row.names(cluster2_vs_cluster3),
+                  row.names(cluster1_vs_cluster3))
+write.table(out, file = "04.rmps_cluster/DEComponent_cluster.xls", sep = "\t", row.names = F)
+```
+
+## visualization
+```{r}
+library(dplyr)
+results = readRDS("04.rmps_cluster/geo_cibersort.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+dat = results[,1:22] %>% data.frame() %>%
+  mutate(cluster = paste0("cluster", clusters[[3]]$consensusClass, sep = "")) 
+dat = reshape2::melt(dat)
+
+colnames(dat) = c("Group", "Cell", "value")
+p = ggplot(dat, aes(x = Cell, y = value, color = Group)) +
+  geom_boxplot(aes(x = Cell), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.2, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.1)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("Immune Component") +
+  scale_color_manual(values = c("cluster1" = "#ec7014", 
+                               "cluster2" = "#88419d", 
+                               "cluster3" = "#238b45")) +  
+  stat_compare_means(label = "p.signif") +
+  theme(legend.position = "top") +
+  theme(axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"))
+p
+ggsave(p, filename = "04.rmps_cluster/rmps_clusterCibersort.pdf", width = 8, height = 4)
+```
+
+# Analysis: Cluster & Infiltration analysis
+## Calculate → ssGSEA
+```{r}
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+exprMatrix = geo$exp
+sets = data.table::fread("04.rmps_cluster/ImmCell.txt")
+sets = split(sets$Gene, sets$CellType)
+gsva_cell <- GSVA::gsva(as.matrix(exprMatrix), sets,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+saveRDS(gsva_cell, file = "04.rmps_cluster/geo_gsvaCell.rds")
+```
+## DE analysis
+```{r}
+library(limma)
+gsva_cell = readRDS("04.rmps_cluster/geo_gsvaCell.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+clusters = clusters[[3]]$consensusClass
+
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+cluster1 = gsva_cell[,clusters == 1]
+cluster2 = gsva_cell[,clusters == 2]
+cluster3 = gsva_cell[,clusters == 3]
+
+cluster1_vs_cluster2 = LimmaDeg(cluster1, cluster2)
+cluster1_vs_cluster2$Type = "cluster1_vs_cluster2"
+cluster2_vs_cluster3 = LimmaDeg(cluster2, cluster3)
+cluster2_vs_cluster3$Type = "cluster2_vs_cluster3"
+cluster1_vs_cluster3 = LimmaDeg(cluster1, cluster3)
+cluster1_vs_cluster3$Type = "cluster1_vs_cluster3"
+out = rbind(cluster1_vs_cluster2, cluster2_vs_cluster3,
+            cluster1_vs_cluster3)
+out$signature = c(row.names(cluster1_vs_cluster2),
+                  row.names(cluster2_vs_cluster3),
+                  row.names(cluster1_vs_cluster3))
+write.table(out, file = "04.rmps_cluster/DEInfiltration_cluster.xls", sep = "\t", row.names = F)
+```
+## visualization
+```{r}
+gsva_cell = readRDS("04.rmps_cluster/geo_gsvaCell.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+dat = gsva_cell%>% t() %>% data.frame() %>%
+  mutate(cluster = paste0("cluster", clusters[[3]]$consensusClass, sep = "")) 
+dat = reshape2::melt(dat)
+
+colnames(dat) = c("Group", "Cell", "value")
+p = ggplot(dat, aes(x = Cell, y = value, color = Group)) +
+  geom_boxplot(aes(x = Cell), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.2, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.1)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("log2(FPKM+1)") +
+  scale_color_manual(values = c("cluster1" = "#ec7014", 
+                               "cluster2" = "#88419d", 
+                               "cluster3" = "#238b45")) +  
+  stat_compare_means(label = "p.signif") +
+  theme(legend.position = "top")+
+  theme(axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"))
+
+ggsave(p, filename = "04.rmps_cluster/geo_clusterCell.pdf", width = 8, height = 4)
+```
+
+# Analysis: Cluster & EMT analysis
+# Analysis: EMT signature
+## load data → ssGSEA
+```{r}
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+exprMatrix = geo$exp
+sets = data.table::fread("04.rmps_cluster/EMT.txt")
+sets = split(sets$Symbol, sets$Signature)
+gsva_EMT <- GSVA::gsva(as.matrix(exprMatrix), sets,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+saveRDS(gsva_EMT, file = "04.rmps_cluster/geo_gsvaEMT.rds")
+```
+## DE analysis
+```{r}
+library(limma)
+gsva_EMT = readRDS("04.rmps_cluster/geo_gsvaEMT.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+clusters = clusters[[3]]$consensusClass
+
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+cluster1 = gsva_EMT[,clusters == 1]
+cluster2 = gsva_EMT[,clusters == 2]
+cluster3 = gsva_EMT[,clusters == 3]
+
+cluster1_vs_cluster2 = LimmaDeg(cluster1, cluster2)
+cluster1_vs_cluster2$Type = "cluster1_vs_cluster2"
+cluster2_vs_cluster3 = LimmaDeg(cluster2, cluster3)
+cluster2_vs_cluster3$Type = "cluster2_vs_cluster3"
+cluster1_vs_cluster3 = LimmaDeg(cluster1, cluster3)
+cluster1_vs_cluster3$Type = "cluster1_vs_cluster3"
+out = rbind(cluster1_vs_cluster2, cluster2_vs_cluster3,
+            cluster1_vs_cluster3)
+out$signature = c(row.names(cluster1_vs_cluster2),
+                  row.names(cluster2_vs_cluster3),
+                  row.names(cluster1_vs_cluster3))
+write.table(out, file = "04.rmps_cluster/DEEMT_cluster.xls", sep = "\t", row.names = F)
+```
+## visualization
+```{r}
+gsva_EMT = readRDS("04.rmps_cluster/geo_gsvaEMT.rds")
+clusters = readRDS("04.rmps_cluster/cluster.rds")
+dat = gsva_EMT%>% t() %>% data.frame() %>%
+  mutate(cluster = paste0("cluster", clusters[[3]]$consensusClass, sep = "")) 
+dat = reshape2::melt(dat)
+
+colnames(dat) = c("Group", "Sig", "value")
+# dat = subset(dat, Sig %in% c("Angiogenesis","EMT1", "EMT2", "EMT3",
+#                              "CD8.T.effector"))
+p = ggplot(dat, aes(x = Sig, y = value, color = Group)) +
+  geom_boxplot(aes(x = Sig), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.2, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.1)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("Enrichment Score") +
+  scale_color_manual(values = c("cluster1" = "#ec7014", 
+                               "cluster2" = "#88419d", 
+                               "cluster3" = "#238b45")) +  
+  stat_compare_means(label = "p.signif") +
+  theme(legend.position = "top")+
+  theme(axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"))
+# p
+ggsave(p, filename = "04.rmps_cluster/geo_EMT.pdf", width = 6, height = 4)
+```

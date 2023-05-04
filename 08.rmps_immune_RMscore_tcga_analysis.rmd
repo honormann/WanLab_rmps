@@ -1,0 +1,165 @@
+# load data
+```{r}
+RMscore = readRDS("08.rmps_immune/tcga_RMscore.rds")
+ptmb = readRDS("01.datatidy/ptmb.rds")
+```
+
+# tidy data
+ [1] "id"              "cluster1_down_H" "cluster1_down_P" "cluster1_up_H"  
+ [5] "cluster1_up_P"   "cluster2_down_H" "cluster2_down_P" "cluster2_up_H"  
+ [9] "cluster2_up_P"   "cluster3_down_H" "cluster3_down_P" "cluster3_up_H"  
+[13] "cluster3_up_P"   "score1"          "RMscore2"        "sumid"
+
+# Analysis: RMscore & survival
+```{r}
+crcTmb = ptmb[match(RMscore$sumid, ptmb$`Patient ID`),]
+crcTmb = as.data.frame(crcTmb)
+crcTmb$RMscore = RMscore$RMscore
+crcTmb = na.omit(crcTmb)
+
+dat = data.frame(os = crcTmb$`OS Cens. (1=Dead,0=Alive)`, 
+                 os.time = crcTmb$`OS (Months)`, 
+                 class = ifelse(crcTmb$RMscore > median(crcTmb$RMscore),
+                                "High", "Low"))
+dat = na.omit(dat)
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+```
+
+
+# Analysis: RMscore & TMB
+ [1] "Patient ID"                  "Tumor Type"                 
+ [3] "Stage"                       "OS (Months)"                
+ [5] "OS Cens. (1=Dead,0=Alive)"   "TMB"                        
+ [7] "Mutations Assessed"          "Multi-Copy Mutations"       
+ [9] "Only-Copy Mutations"         "Persistent Mutations"       
+[11] "Clonal Multi-Copy Mutations" "Clonal Only-Copy Mutations" 
+[13] "Clonal Persistent Mutations" "Clonal Mutations" 
+```{r}
+metrics = "TMB"
+
+crcTmb = ptmb[match(RMscore$sumid, ptmb$`Patient ID`),]
+crcTmb = as.data.frame(crcTmb)
+# crcTmb$RMscore = RMscore$RMscore2
+crcTmb$RMscore = RMscore$cluster1_up_P +RMscore$cluster2_down_P + RMscore$cluster3_down_P
+crcTmb = na.omit(crcTmb)
+
+dat = data.frame(RMscore = crcTmb$RMscore, mut = crcTmb[, metrics])
+
+p = ggplot(dat, aes(x=mut, y=RMscore)) + 
+  geom_point(color = "#4a1486")+
+  geom_smooth(method=lm, se=FALSE, color = "#ff7f00") +
+  theme_classic() + 
+  stat_cor(method = "pearson") +
+  xlab("Tumor Mutation Burden") +
+  theme(axis.text = element_text(colour = "black"))
+ggsave(p, filename = "08.rmps_immune/RMscore_TMB.pdf", width = 3, height = 3)
+```
+# Analysis: RMscore & mutation
+```{r}
+library(dplyr)
+library(maftools)
+crc_mut = readRDS("02.rmps_genetic_variation/crc_mut.rds")
+
+crcId = data.frame(Barcode = crc_mut@variants.per.sample$Tumor_Sample_Barcode,
+        id = stringr::str_sub(crc_mut@variants.per.sample$Tumor_Sample_Barcode, 1, 12))
+
+crc_phe = crcTmb
+colnames(crc_phe)[1] = "id"
+crc_phe$type = ifelse(crc_phe$RMscore > median(crc_phe$RMscore), 
+                      "high","low" )
+  
+# crc_high = subset(crc_phe, E1type == "high" & E3type == "high")
+crc_high = subset(crc_phe, type == "high")
+crc_high_id = crc_high$id[crc_high$id %in% crcId$id]
+crc_high_id = crcId$Barcode[match(crc_high_id, crcId$id)]
+crcHighMut = subsetMaf(maf = crc_mut, tsb = crc_high_id)
+
+# crc_low = subset(crc_phe, E1type == "low" & E3type == "low")
+crc_low = subset(crc_phe, type == "low")
+crc_low_id = crc_low$id[crc_low$id %in% crcId$id]
+crc_low_id = crcId$Barcode[match(crc_low_id, crcId$id)]
+crcLowMut = subsetMaf(maf = crc_mut, tsb = crc_low_id)
+
+```
+
+## visualization
+```{r}
+col = c("#a6cee3", "#6a51a3", "#d94801", "#33a02c",
+        "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00")
+# col = rev(col)
+names(col) = c('Frame_Shift_Del','Missense_Mutation', 'Nonsense_Mutation', 'Multi_Hit', 'Frame_Shift_Ins','In_Frame_Ins', 'Splice_Site', 'In_Frame_Del')
+# pdf("02.RMPs_lanscape/mut_landscape.pdf", width = 5, height = 9)
+oncoplot(maf = crcHighMut,
+         colors = col, bgCol="#f0f0f0", top = 20)
+oncoplot(maf = crcLowMut,
+         colors = col, bgCol="#f0f0f0", top = 20)
+# dev.off()
+```
+# Analysis: RMscore & CMS
+## Calculate CMS 
+```{r}
+tcga_pan = readRDS("01.datatidy/pan_exp.rds")
+tcga_pan = as.data.frame(tcga_pan)
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) != "01B") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+
+crcExp = tcga_pan[, intersect(colnames(tcga_pan), crcPhe$sample)]
+# crcExp = subset(tcga_pan, xena_sample %in% unlist(ClusterGene))
+mean_value = apply(crcExp[,2:ncol(crcExp)], 1, mean)
+crcExp = crcExp[order(mean_value, decreasing = T),]
+crcExp$xena_sample = tcga_pan$xena_sample
+crcExp = crcExp[!duplicated(crcExp$xena_sample),]
+row.names(crcExp) = NULL
+crcExp = tibble::column_to_rownames(crcExp, var = "xena_sample")
+CMS.res = CMScaller::CMScaller(crcExp, templates = CMScaller::templates.CMS,
+                    rowNames = "symbol")
+saveRDS(CMS.res, file = "01.datatidy/tcgaCMS.rds")
+```
+
+## RMPCluster
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+results = readRDS("01.datatidy/tcgaCMS.rds")
+RMscore = readRDS("08.rmps_immune/tcga_RMscore.rds")
+dat = data.frame(class = results$prediction, RMscore = RMscore$RMscore)
+dat$class = paste("cluster", dat$class, sep = "")
+dat = subset(dat, class != "clusterNA")
+# dat$class = stringr::str_sub(dat$class, 8, 18)
+p = ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.5, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("clusterCMS1" = "#ff7f00",
+                               "clusterCMS2" = "#4daf4a",
+                               "clusterCMS3" = "#984ea3",
+                               "clusterCMS4" = "#c51b7d")) +
+  stat_compare_means(label = "p.signif", label.x = 2.4) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text  = element_text(colour = "black"))
+ggsave(p, filename = "08.rmps_immune/RMscore_CMS_tcga.pdf", width = 2, height = 3)
+```
+

@@ -1,0 +1,170 @@
+# load data
+```{r}
+tcga_score = read.csv("06.SLRMP/model/tcga_score.csv")
+geo_score = read.csv("06.SLRMP/model/geo_score.csv")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+crc = readRDS("01.datatidy/crcData.rds")
+```
+
+# tidy data
+```{r}
+tcga_score = tcga_score[,-1]
+geo_score = geo_score[,-1]
+colnames(tcga_score) = c("E1", "E3")
+colnames(geo_score) = c("E1", "E3")
+```
+
+# Analysis E3 & E1 correlation
+```{r}
+library(ggplot2)
+library(ggpubr)
+ggplot(tcga_score, aes(x = E1, y = E3)) +
+  geom_point() + 
+  stat_cor(method = "pearson")
+```
+
+# Analysis E3 & E1 tmb
+```{r}
+tmb = readRDS("01.datatidy/ptmb.rds")
+colnames(tmb)[1] = "id"
+meta = crc$phe
+meta = cbind(meta, tcga_score)
+meta = left_join(meta, tmb, by = "id")
+dat = na.omit(meta)
+```
+
+```{r}
+ggplot(dat, aes(x = E3, y = TMB)) +
+  geom_point() + 
+  stat_cor(method = "pearson")
+```
+```{r}
+meta$type = ifelse(meta$E3 > quantile(meta$E3, 0.75), "high",
+                      ifelse(meta$E3 < quantile(meta$E3, 0.25), "low", "normal") )
+ggplot(meta, aes(x = type, y = TMB)) +
+  geom_boxplot() +
+  stat_compare_means()
+```
+# Analysis: Cluster & Survival
+```{r}
+phe = na.omit(meta)
+
+dat = data.frame(os = phe$`OS Cens. (1=Dead,0=Alive)`, os.time = phe$`OS (Months)`, E3 = phe$E3)
+# dat$class = ifelse(dat$E3type == 'High' & dat$E1type == "High", "High",
+#                    ifelse(dat$E3type == 'Low' & dat$E1type == "Low", "Low", "Normal"))
+dat$class = ifelse(dat$E3 > quantile(dat$E3, 0.75), "high",
+                      ifelse(dat$E3 < quantile(dat$E3, 0.25), "low", "normal"))
+
+dat = na.omit(dat)
+# dat = subset(dat, GSE == "GSE39582") # GSE39582, GSE17536
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+pdf(file = "06.SLRMP/E3_survival_tcga.pdf", width = 4.5, height = 5.5)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+
+# Analysis score & mutation
+```{r}
+library(dplyr)
+library(maftools)
+crc_mut = readRDS("02.RMPs_lanscape/crcSrmp_mut.rds")
+
+crcId = data.frame(Barcode = crc_mut@variants.per.sample$Tumor_Sample_Barcode,
+        id = stringr::str_sub(crc_mut@variants.per.sample$Tumor_Sample_Barcode, 1, 12))
+
+crc_phe = cbind(crc$phe, tcga_score)
+# crc_phe$E1type = ifelse(tcga_score$E1 > median(tcga_score$E1), "high", "low")
+# crc_phe$E3type = ifelse(tcga_score$E3 > median(tcga_score$E3), "high", "low")
+crc_phe$type = ifelse(tcga_score$E1 > quantile(tcga_score$E1, 0.75), "high",
+                      ifelse(tcga_score$E1 < quantile(tcga_score$E1, 0.25), "low", "normal") )
+  
+# crc_high = subset(crc_phe, E1type == "high" & E3type == "high")
+crc_high = subset(crc_phe, type == "high")
+crc_high_id = crc_high$id[crc_high$id %in% crcId$id]
+crc_high_id = crcId$Barcode[match(crc_high_id, crcId$id)]
+crcHighMut = subsetMaf(maf = crc_mut, tsb = crc_high_id)
+
+# crc_low = subset(crc_phe, E1type == "low" & E3type == "low")
+crc_low = subset(crc_phe, type == "low")
+crc_low_id = crc_low$id[crc_low$id %in% crcId$id]
+crc_low_id = crcId$Barcode[match(crc_low_id, crcId$id)]
+crcLowMut = subsetMaf(maf = crc_mut, tsb = crc_low_id)
+
+```
+
+## visualization
+```{r}
+col = c("#a6cee3", "#6a51a3", "#d94801", "#33a02c",
+        "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00")
+# col = rev(col)
+names(col) = c('Frame_Shift_Del','Missense_Mutation', 'Nonsense_Mutation', 'Multi_Hit', 'Frame_Shift_Ins','In_Frame_Ins', 'Splice_Site', 'In_Frame_Del')
+# pdf("02.RMPs_lanscape/mut_landscape.pdf", width = 5, height = 9)
+oncoplot(maf = crcHighMut,
+         colors = col, bgCol="#f0f0f0", top = 50)
+oncoplot(maf = crcLowMut,
+         colors = col, bgCol="#f0f0f0", top = 50)
+# dev.off()
+```
+# Analysis: survival
+```{r}
+phe = geo$phe
+RMscore = geo_score
+dat = data.frame(os = phe$os.event, os.time = phe$os.time, 
+                 E3type = ifelse(RMscore$E3 > median(RMscore$E3), "High", "Low"),
+                 E1type = ifelse(RMscore$E1 > median(RMscore$E1), "High", "Low"),
+                 GSE = phe$GSE)
+# dat$class = ifelse(dat$E3type == 'High' & dat$E1type == "High", "High",
+#                    ifelse(dat$E3type == 'Low' & dat$E1type == "Low", "Low", "Normal"))
+dat$class = ifelse(RMscore$E3 > quantile(RMscore$E3, 0.75), "high",
+                      ifelse(RMscore$E3 < quantile(RMscore$E3, 0.25), "low", "normal"))
+
+dat = na.omit(dat)
+dat = subset(dat, GSE == "GSE39582") # GSE39582, GSE17536
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+pdf(file = "06.SLRMP/E3_survival_geo.pdf", width = 4.5, height = 5.5)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+# Analysis: score mmr
+```{r}
+phe = geo$phe
+dat = data.frame(mmr = phe$mmr.status, score = geo_score$E1)
+dat = na.omit(dat)
+dat = subset(dat, mmr %in% c("dMMR",  "MSI",  "MSS", "pMMR"))
+dat$mmr = factor(dat$mmr, levels = c("dMMR", "pMMR", "MSI", "MSS"))
+```
+
+```{r}
+library(RColorBrewer)
+colors = colorRampPalette(brewer.pal(4, "Dark2"))(4)
+
+p = ggplot(dat, aes(x = mmr, y = score, color = mmr)) +
+  geom_boxplot(width = 0.5) +
+  geom_jitter(aes(color = mmr), width = 0.15, alpha = 0.8, size = 0.5) +
+  stat_compare_means(label.x  = 2) +
+  theme_classic() +
+  ylab("Stem-like RMP Score") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text = element_text(size = 10, colour = "black")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  theme(legend.position = "none") +
+  scale_color_manual(values = colors)
+ggsave("06.SLRMP/E1_MMR.pdf", width = 6, height = 3)
+```
+

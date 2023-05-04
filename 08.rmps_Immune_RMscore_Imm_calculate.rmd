@@ -1,0 +1,96 @@
+# load data
+```{r}
+dir.create("07.ImmuneAnalysis")
+ImmData = readRDS("01.datatidy/ImmDataset.rds")
+ClusterGene = readRDS("07.geneCluster/cluster_gene.rds")
+```
+
+# Tidy data
+```{r}
+expData = ImmData$exp
+colnames(expData$IMVigor)[1] = "GENE_SYMBOL"
+
+dat = expData$`GBM-PRJNA482620`
+
+TidyExp = function(dat){
+  expDat = apply(dat[, 2:ncol(dat)], 2, as.numeric) %>% data.frame()
+  mean_value = apply(expDat, 1, mean)
+  expDat$Gene = dat$GENE_SYMBOL
+  expDat = expDat[order(mean_value, decreasing = T),]
+  expDat = expDat[!duplicated(expDat$Gene),]
+  expDat = na.omit(expDat)
+  row.names(expDat) = NULL
+  expDat = tibble::column_to_rownames(expDat, var = "Gene")
+  return(expDat)
+}
+
+expData = lapply(expData, TidyExp)
+saveRDS(expData, file = "01.datatidy/ImmExpData.rds")
+```
+
+# Calculate RMscore
+```{r}
+library(dplyr)
+ImmExp = readRDS("01.datatidy/ImmExpData.rds")
+ClusterGene = readRDS("08.rmps_immune/cluster_gene.rds")
+
+# RMscore = function(exp, cluster_gene_df, sur_df){
+
+RMscore = function(exp, cluster_gene_df){
+  exp = as.matrix(exp)
+  accu_score = function(exp, cluster_gene_df, alpha = 0.25){
+  row_names = rownames(exp)
+  num_genes = nrow(exp)
+  gene_sets = split(cluster_gene_df$gene, cluster_gene_df$cluster)
+  gene_sets = lapply(gene_sets, function(genes) {which(row_names %in% genes)})
+  
+  # Ranks for genes
+  R = matrixStats::colRanks(exp, preserveShape = T, ties.method = 'average')
+  # Calculate enrichment score (es) for each sample (column)
+  es = apply(R, 2, function(R_col) {
+    gene_ranks = order(R_col, decreasing = TRUE)
+    
+    # Calc es for each gene set
+    es_sample = sapply(gene_sets, function(gene_set_idx) {
+      # pos: match (within the gene set)
+      # neg: non-match (outside the gene set)
+      indicator_pos = gene_ranks %in% gene_set_idx
+      indicator_neg = !indicator_pos
+      
+      rank_alpha  = (R_col[gene_ranks] * indicator_pos) ^ alpha
+      
+      step_cdf_pos = cumsum(rank_alpha)    / sum(rank_alpha)
+      step_cdf_neg = cumsum(indicator_neg) / sum(indicator_neg)
+      
+      step_cdf_diff = step_cdf_pos - step_cdf_neg
+      
+      # Normalize by gene number
+      step_cdf_diff = step_cdf_diff / num_genes
+      
+      # Use ssGSEA or not
+      sum(step_cdf_diff)})
+    unlist(es_sample)})
+  
+  if (length(gene_sets) == 1) es = matrix(es, nrow = 1)
+
+  # Prepare output
+  rownames(es) = names(gene_sets)
+  colnames(es) = colnames(exp)
+  return(es)
+}
+  accumulate_score = accu_score(exp = exp, cluster_gene_df = cluster_gene_df)
+  RMscore = t(accumulate_score) %>% data.frame()
+  
+  RMscore = data.frame(id = colnames(exp), RMscore = RMscore)
+  colnames(RMscore) = stringr::str_split(colnames(RMscore), "[.]", simplify = T)[,2]
+  RMscore$RMscore = RMscore$cluster1_up_P + RMscore$cluster2_down_P +
+  RMscore$cluster3_down_P
+
+  return(RMscore)
+}
+ImmRMscore = lapply(ImmExp, RMscore, cluster_gene_df = ClusterGene)
+saveRDS(ImmRMscore, file = "08.rmps_immune/ImmRMscore.rds")
+write.table(ImmRMscore$IMVigor, file = "08.rmps_immune/IMvigorRmps.xls", row.names = F, sep = "\t")
+write.table(ImmRMscore$`STAD-PRJEB25780`, file = "08.rmps_immune/STADRmps.xls", row.names = F, sep = "\t")
+```
+

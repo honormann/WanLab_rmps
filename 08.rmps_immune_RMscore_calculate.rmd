@@ -1,0 +1,295 @@
+# load data
+```{r}
+results = readRDS("04.rmps_cluster/cluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+```
+
+# Analysis: Deg
+```{r}
+library(dplyr)
+library(limma)
+Exp = geo$exp
+Phe = geo$phe
+Phe = subset(Phe, GSE == "GSE39582")
+Group = data.frame(ID = colnames(Exp), Cluster = results[[3]]$consensusClass)
+# Group = data.frame(ID = colnames(Exp), Cluster = results[[2]]$consensusClass)
+Exp = Exp[, Phe$GSM]
+Group = Group[Phe$GSM,]
+
+# groupDat = as.data.frame()
+groupDat = as.data.frame((combn(3, 2)))
+groupDat = as.list(groupDat)
+namesDat = unlist(lapply(groupDat, function(x){x = paste(x, collapse = "_")}))
+names(groupDat) = namesDat
+
+ClusterCom = function(subGroup){
+  con = subset(Group, Cluster == subGroup[1])
+  con$Cluster = "con"
+  treat = subset(Group, Cluster == subGroup[2])
+  treat$Cluster = "treat"
+
+  subGroup = rbind(con, treat)
+
+  subGroup$Cluster = factor(subGroup$Cluster, levels = c("con", "treat"))
+  desigN <- model.matrix(~subGroup$Cluster + 0)
+  rownames(desigN) = row.names(subGroup)
+  colnames(desigN) = c("con", "treat")
+
+  comparE <- makeContrasts(con - treat, levels=desigN)
+
+  Exp = Exp[,subGroup$ID]
+  fiT <- lmFit(Exp, desigN)
+  fiT2 <- contrasts.fit(fiT, comparE)
+  fiT3 <- eBayes(fiT2)
+
+  KeggDiff <- topTable(fiT3, coef=1, number = nrow(Exp))
+  return(KeggDiff)
+}
+
+ComCluster = lapply(groupDat, ClusterCom)
+saveRDS(ComCluster, file = "08.rmps_immune/ComCluster.rds")
+```
+
+## filter and visualization
+```{r}
+ComCluster = readRDS(file = "08.rmps_immune/ComCluster.rds")
+de_gsva = do.call(rbind, ComCluster)
+write.table(de_gsva, file = "08.rmps_immune/cluster_diff.xls", sep = "\t", row.names = T)
+
+# filter: diff Gene
+cluster1.up1 = subset(ComCluster$`1_2`, logFC>0.00 & adj.P.Val<0.05)
+cluster1.up2 = subset(ComCluster$`1_3`, logFC>0.00 & adj.P.Val<0.05)
+cluster1.up = intersect(row.names(cluster1.up1), row.names(cluster1.up2))
+
+cluster1.down1 = subset(ComCluster$`1_2`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster1.down2 = subset(ComCluster$`1_3`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster1.down = intersect(row.names(cluster1.down1), row.names(cluster1.down2))
+
+cluster2.up1 = subset(ComCluster$`1_2`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster2.up2 = subset(ComCluster$`2_3`, logFC>0.00 & adj.P.Val<0.05)
+cluster2.up = intersect(row.names(cluster2.up1), row.names(cluster2.up2))
+
+cluster2.down1 = subset(ComCluster$`1_2`, logFC>0.00 & adj.P.Val<0.05)
+cluster2.down2 = subset(ComCluster$`2_3`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster2.down = intersect(row.names(cluster2.down1), row.names(cluster2.down2))
+
+cluster3.up1 = subset(ComCluster$`1_3`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster3.up2 = subset(ComCluster$`2_3`, logFC<(-0.00) & adj.P.Val<0.05)
+cluster3.up = intersect(row.names(cluster3.up1), row.names(cluster3.up2))
+
+cluster3.down1 = subset(ComCluster$`1_3`, logFC>-0.00 & adj.P.Val<0.05)
+cluster3.down2 = subset(ComCluster$`2_3`, logFC>-0.00 & adj.P.Val<0.05)
+cluster3.down = intersect(row.names(cluster3.down1), row.names(cluster3.down2))
+
+write.table(cluster1.up, file = "08.rmps_immune/cluster1_up.xls", quote = F, row.names = F, col.names = F)
+write.table(cluster2.up, file = "08.rmps_immune/cluster2_up.xls", quote = F, row.names = F, col.names = F)
+write.table(cluster3.up, file = "08.rmps_immune/cluster3_up.xls", quote = F, row.names = F, col.names = F)
+write.table(cluster1.down, file = "08.rmps_immune/cluster1_down.xls", quote = F, row.names = F, col.names = F)
+write.table(cluster2.down, file = "08.rmps_immune/cluster2_down.xls", quote = F, row.names = F, col.names = F)
+write.table(cluster3.down, file = "08.rmps_immune/cluster3_down.xls", quote = F, row.names = F, col.names = F)
+
+cluster_diff = list(cluster1.up = cluster1.up, cluster2.up = cluster2.up,
+                  cluster3.up = cluster3.up,
+                  cluster1.down = cluster1.down,
+                  cluster2.down = cluster2.down,
+                  cluster3.down = cluster3.down
+                  )
+# cluster_diff = subset(ComCluster$`1_2`, adj.P.Val<0.05 & abs(logFC)>0.5)
+# cluster_diff = subset(ComCluster$`1_2`, adj.P.Val<0.001)
+
+saveRDS(cluster_diff, file = "08.rmps_immune/cluster_diff.rds")
+```
+
+# Analysis: unicox
+```{r}
+library(survival)
+phe = geo$phe
+Phe = subset(Phe, GSE == "GSE39582")
+sur = data.frame(os = phe$os.event, os.time = phe$os.time, gsm = phe$GSM)
+sur = na.omit(sur)
+subExp = geo$exp[, sur$gsm] %>% t() %>% as.data.frame() %>% as.list()
+
+uniCoxT = function(dat){
+  dat = data.frame(os = sur$os, os.time = sur$os.time, 
+                 gene = dat)
+  res.cox <- coxph(Surv(os.time, os) ~ gene, data = dat)
+  res.cox <- summary(res.cox)
+  p.value<-signif(res.cox$wald["pvalue"], digits=3)
+  HR <-signif(res.cox$coef[2], digits=3)
+  HR.confint.lower <- signif(res.cox$conf.int[,"lower .95"], 3)
+  HR.confint.upper <- signif(res.cox$conf.int[,"upper .95"], 3)
+  out = data.frame(pval = p.value, HR = HR, HR.up = HR.confint.upper,
+                   HR.low = HR.confint.lower)
+  return(out)
+}
+
+uni.res = lapply(subExp, uniCoxT)
+uni.res = do.call(rbind, uni.res)
+uni.res$adjp = p.adjust(uni.res$pval, method = "fdr")
+uni.res$gene = row.names(uni.res)
+saveRDS(uni.res, file = "08.rmps_immune/geo_uni.rds")
+
+write.table(uni.res, file = "08.rmps_immune/geo_unicox.xls", sep = "\t", row.names = F)
+```
+
+# Analysis: Cluster Gene
+```{r}
+cluster_diff = readRDS("08.rmps_immune/cluster_diff.rds")
+uni.res = readRDS("08.rmps_immune/geo_uni.rds")
+
+sur_gene = subset(uni.res,  pval < 0.05)
+sur_gene = sur_gene$gene
+
+# cluster_diff$gene = row.names(cluster_diff)
+# sur_gene$gene = row.names(sur_gene)
+
+# cluster_gene = dplyr::left_join(cluster_diff, sur_gene, by = "gene")
+# cluster_gene = na.omit(cluster_gene)
+cluster1.gene = unique(c(cluster_diff$cluster1.up,
+                       cluster_diff$cluster1.down))
+cluster1.gene = intersect(cluster1.gene, sur_gene)
+cluster1.geneCox = uni.res[match(cluster1.gene, uni.res$gene),]
+cluster1.geneCox$cluster = ifelse(cluster1.geneCox$gene %in% cluster_diff$cluster1.up, "cluster1_up", "cluster1_down")
+
+cluster2.gene = unique(c(cluster_diff$cluster2.up,
+                       cluster_diff$cluster2.down))
+cluster2.gene = intersect(cluster2.gene, sur_gene)
+cluster2.geneCox = uni.res[match(cluster2.gene, uni.res$gene),]
+cluster2.geneCox$cluster = ifelse(cluster2.geneCox$gene %in% cluster_diff$cluster2.up, "cluster2_up", "cluster2_down")
+
+
+cluster3.gene = unique(c(cluster_diff$cluster3.up,
+                       cluster_diff$cluster3.down))
+cluster3.gene = intersect(cluster3.gene, sur_gene)
+cluster3.geneCox = uni.res[match(cluster3.gene, uni.res$gene),]
+cluster3.geneCox$cluster = ifelse(cluster3.geneCox$gene %in% cluster_diff$cluster3.up, "cluster3_up", "cluster3_down")
+
+
+write.table(cluster1.geneCox, file = "08.rmps_immune/cluster1_geneCox.xls", quote = F, row.names = F, sep = "\t")
+write.table(cluster2.geneCox, file = "08.rmps_immune/cluster2_geneCox.xls", quote = F, row.names = F, sep = "\t")
+write.table(cluster3.geneCox, file = "08.rmps_immune/cluster3_geneCox.xls", quote = F, row.names = F, sep = "\t")
+
+# cluster_gene = list(cluster1 = cluster1.gene, cluster2 = cluster2.gene,
+#                   cluster3 = cluster3.gene)
+# cluster1.geneCox$cluster = "cluster1"
+# cluster2.geneCox$cluster = "cluster2"
+# cluster3.geneCox$cluster = "cluster3"
+cluster_Gene = rbind(cluster1.geneCox, cluster2.geneCox, cluster3.geneCox)
+# cluster_gene$cluster = ifelse(cluster_gene$logFC>0, 
+#                               ifelse(cluster_gene$HR > 1, "cluster1.H",
+#                                      "cluster1.P"),
+#                               ifelse(cluster_gene$HR > 1, "cluster2.H",
+                                     # "cluster2.P"))
+cluster_Gene$cluster = ifelse(cluster_Gene$HR>1,
+                              paste(cluster_Gene$cluster, "H", sep = "_"),
+                              paste(cluster_Gene$cluster, "P", sep = "_"))
+saveRDS(cluster_Gene, file = "08.rmps_immune/cluster_gene.rds")
+write.table(cluster_Gene, file = "08.rmps_immune/cluster_Gene.xls", quote = F, row.names = F, sep = "\t")
+
+```
+
+# Analysis: RMscore
+```{r}
+cluster_gene = readRDS("08.rmps_immune/cluster_gene.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+sur = data.frame(os = phe$os.event, os.time = phe$os.time, gsm = phe$GSM)
+sur = na.omit(sur)
+```
+
+## calculate RMscore
+```{r}
+library(dplyr)
+library(survival)
+
+# RMscore = function(exp, cluster_gene_df, sur_df){
+RMscore = function(exp, cluster_gene_df){
+  accu_score = function(exp, cluster_gene_df, alpha = 0.25){
+  row_names = rownames(exp)
+  num_genes = nrow(exp)
+  gene_sets = split(cluster_gene_df$gene, cluster_gene_df$cluster)
+  gene_sets = lapply(gene_sets, function(genes) {which(row_names %in% genes)})
+  
+  # Ranks for genes
+  R = matrixStats::colRanks(exp, preserveShape = T, ties.method = 'average')
+  # Calculate enrichment score (es) for each sample (column)
+  es = apply(R, 2, function(R_col) {
+    gene_ranks = order(R_col, decreasing = TRUE)
+    
+    # Calc es for each gene set
+    es_sample = sapply(gene_sets, function(gene_set_idx) {
+      # pos: match (within the gene set)
+      # neg: non-match (outside the gene set)
+      indicator_pos = gene_ranks %in% gene_set_idx
+      indicator_neg = !indicator_pos
+      
+      rank_alpha  = (R_col[gene_ranks] * indicator_pos) ^ alpha
+      
+      step_cdf_pos = cumsum(rank_alpha)    / sum(rank_alpha)
+      step_cdf_neg = cumsum(indicator_neg) / sum(indicator_neg)
+      
+      step_cdf_diff = step_cdf_pos - step_cdf_neg
+      
+      # Normalize by gene number
+      step_cdf_diff = step_cdf_diff / num_genes
+      
+      # Use ssGSEA or not
+      sum(step_cdf_diff)})
+    unlist(es_sample)})
+  
+  if (length(gene_sets) == 1) es = matrix(es, nrow = 1)
+
+  # Prepare output
+  rownames(es) = names(gene_sets)
+  colnames(es) = colnames(exp)
+  return(es)
+}
+  accumulate_score = accu_score(exp = exp, cluster_gene_df = cluster_gene_df)
+  
+  RMscore = t(accumulate_score) %>% data.frame()
+  
+  # cox analysis
+  # dat = RMscore[sur_df$gsm,]
+  # dat = cbind(dat, sur_df)
+  # res.cox <- coxph(Surv(os.time, os) ~ cluster1 + cluster2 + cluster3, 
+  #                  data =  dat)
+  # RMscore = RMscore$cluster1*res.cox$coefficients[1] +
+  #   RMscore$cluster1*res.cox$coefficients[2] +
+  #   RMscore$cluster1*res.cox$coefficients[3]
+  # RMscore = RMscore$cluster1 - RMscore$cluster2 + RMscore$cluster3
+  # RMscore$cluster1_down = -RMscore$cluster1_down
+  # RMscore$cluster2_up = -RMscore$cluster2_up
+  # RMscore$cluster3_up = -RMscore$cluster3_up
+  # RMscore$cluster1.up = -RMscore$cluster1.up
+  # RMscore = apply(RMscore, 1, sum)
+  # RMscore = -RMscore$cluster1.H + RMscore$cluster2.P
+  # RMscore1 = RMscore$cluster1_up_H + RMscore$cluster2_up_H +
+  #   RMscore$cluster3_up_H - RMscore$cluster1_down_P - RMscore$cluster2_down_P -
+  #   RMscore$cluster3_down_P
+  # 
+  # RMscore2 = RMscore$cluster1_up_P + RMscore$cluster2_up_P +
+  #   RMscore$cluster3_up_P - RMscore$cluster1_down_H - RMscore$cluster2_down_H -
+  #   RMscore$cluster3_down_H
+  
+  RMscore = data.frame(id = colnames(exp), RMscore)
+  RMscore$RMscore = RMscore$cluster1_up_P + RMscore$cluster2_down_P +
+  RMscore$cluster3_down_P
+  # RMscore$RMscore1 = RMscore$cluster1_up_P + RMscore$cluster2_up_P +
+  #   RMscore$cluster3_up_P - RMscore$cluster1_down_H - RMscore$cluster2_down_H -
+  #   RMscore$cluster3_down_H
+  # 
+  # RMscore$RMscore2 = RMscore$cluster1_up_H + RMscore$cluster2_up_H +
+  #   RMscore$cluster3_up_H - RMscore$cluster1_down_P - RMscore$cluster2_down_P -
+  #   RMscore$cluster3_down_P
+
+  return(RMscore)
+}
+geo_RMscore = RMscore(exp = geo$exp, cluster_gene_df = cluster_gene)
+
+  
+saveRDS(geo_RMscore, file = "08.rmps_immune/geo_RMscore.rds")
+phe$RMscore = geo_RMscore$RMscore
+write.table(phe, file = "08.rmps_immune/geo_RMscore.xls", quote = F, row.names = F, sep = "\t")
+```
+
+

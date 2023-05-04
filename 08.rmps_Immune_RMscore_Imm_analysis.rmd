@@ -1,0 +1,170 @@
+# load data
+```{r}
+RMscore = readRDS("08.rmps_immune/ImmRMscore.rds")
+ImmDataset = readRDS("01.datatidy/ImmDataset.rds")
+phe = ImmDataset$phe
+```
+
+# Tidy data
+```{r}
+MetaPhe = phe
+ImPhe = MetaPhe$IMVigor
+MetaPhe$IMVigor = NULL
+
+dat = MetaPhe$`Melanoma-phs000452`
+dat = rbind(colnames(dat), data.frame(dat))
+colnames(dat) = colnames(MetaPhe$`GBM-PRJNA482620`)  
+MetaPhe$`Melanoma-phs000452` = dat
+
+MetaPhe = do.call(rbind, MetaPhe)
+MetaScore = do.call(rbind, RMscore)
+colnames(MetaScore)[1] = "sample_id"
+MetaPhe = dplyr::left_join(MetaPhe, MetaScore, by = "sample_id")
+
+colnames(ImPhe)[1] = "sample_id"
+ImPhe = dplyr::left_join(ImPhe, MetaScore, by = "sample_id")
+ImmMeta = list(MetaDataset = MetaPhe, InDataset = ImPhe)
+saveRDS(ImmMeta, file = "08.rmps_immune/ImmMeta.rds")
+```
+
+# Analysis: RMscore & IMVigor Datasets
+```{r}
+ImmMeta = readRDS("08.rmps_immune/ImmMeta.rds")
+IMdat = ImmMeta$InDataset
+# source("assist.r")
+
+# IMdat = scaleRMscore(IMdat)
+IMdat$RMscore = IMdat$RMscore
+# IMdat$RMscore = IMdat$cluster1_up_H +IMdat$cluster2_down_H + IMdat$cluster3_down_H
+write.table(IMdat, file = "08.rmps_immune/IMVigorRMscore.xls", sep = "\t", row.names = FALSE)
+
+```
+
+## RMscore & response
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+dat = data.frame(RMscore = IMdat$RMscore, 
+                 class = IMdat$binaryResponse)
+dat = na.omit(dat)
+dat = subset(dat, class != "NE")
+dat$class = factor(dat$class, levels = c("SD/PD", "CR/PR"))
+p = ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.5, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("SD/PD" = "#984ea3",
+                               "excluded" = "#4daf4a",
+                               "CR/PR" = "#ff7f00",
+                               "clusterCMS4" = "#c51b7d")) +
+  stat_compare_means(label = "p.signif", label.x = 1.4) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text  = element_text(colour = "black"))
+
+
+ggsave(p, filename = "08.rmps_immune/response_rmps_score_IMvigor.pdf", width = 1.5, height = 3.5)
+```
+## RMscore & survival
+```{r}
+dat = data.frame(os = IMdat$censOS, 
+                 os.time = IMdat$os,
+                 class = ifelse(IMdat$RMscore > median(IMdat$RMscore),
+                                "High", "Low"))
+dat = na.omit(dat)
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+pdf(file = "08.rmps_immune/rmpSurvial_IMVigor.pdf", width = 4.5, height = 5.5)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+
+## RMscore & Mutaion/neoantigen
+```{r}
+dat = data.frame(RMscore = IMdat$RMscore, item = IMdat$`Neoantigen burden per MB`)
+dat = na.omit(dat)
+
+p = ggplot(dat, aes(x=item, y=RMscore)) + 
+  geom_point(color = "#4a1486")+
+  geom_smooth(method=lm, se=FALSE, color = "#ff7f00") +
+  theme_classic() + 
+  stat_cor(method = "pearson") +
+  xlab("Neoantigen burden per MB") +
+  theme(axis.text = element_text(colour = "black"))
+ggsave(p, filename = "08.rmps_immune/RMscore_Neoantigen.pdf", width = 3, height = 3)
+```
+
+
+
+# Analysis: RMscore & Meta Datasets
+ [1] "V1"                      "sample_id"               "patient_name"           
+ [4] "dataset_id"              "dataset_group"           "Treatment"              
+ [7] "response"                "response_NR"             "M Stage"                
+[10] "overall survival (days)" "vital status"            "Total Mutation"         
+[13] "Gender"                  "Therapy"                 "age_start"              
+[16] "tumor_type"              "seq_type"                "id"                     
+[19] "RMscore"     
+
+
+```{r}
+MetDat = ImmMeta$MetaDataset
+```
+
+## RMscore & Response
+Braun_2020    E-MTAB-6270      GSE100797      GSE106128      GSE115821 
+       311             12             25             47             37 
+ GSE126044      GSE135222      GSE145996       GSE67501       GSE78220 
+         7             27              4             11             28 
+  GSE91061       GSE93157       GSE96619 Nathanson_2017      phs000452 
+       109             65             10             64            153 
+PRJEB23709     PRJEB25780    PRJNA482620 
+        91             78             34  
+        
+```{r}
+library(ggplot2)
+library(ggpubr)
+# source("assist.r")
+choseDat = subset(MetDat, dataset_id == "PRJEB23709")
+write.table(choseDat, file = "08.rmps_immune/STADRMscore.xls", sep = "\t", row.names = FALSE)
+# choseDat = scaleRMscore(choseDat)
+dat = data.frame(RMscore = choseDat$cluster3_down_P, class = choseDat$response_NR)
+
+dat = na.omit(dat)
+dat = subset(dat, class != "UNK")
+dat$class = factor(dat$class, levels = c("N", "R"))
+
+p = ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.5, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("N" = "#984ea3",
+                               "excluded" = "#4daf4a",
+                               "R" = "#ff7f00",
+                               "clusterCMS4" = "#c51b7d")) +
+  stat_compare_means(label = "p.signif", label.x = 1.4) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text  = element_text(colour = "black"))
+
+
+ggsave(p, filename = "08.rmps_immune/response_rmps_score_STAD.pdf", width = 1.5, height = 3.5)
+```

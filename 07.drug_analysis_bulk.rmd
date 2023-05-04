@@ -1,0 +1,157 @@
+# load data
+```{r}
+GSE5851_exp = data.table::fread("_drug_response/GSE5851/exp.txt")
+GSE5851_ann = data.table::fread("_drug_response/GSE5851/ann.txt")
+GSE5851_phe = data.table::fread("_drug_response/GSE5851/phe.txt", header = F)
+
+GSE159216_exp = data.table::fread("_drug_response/GSE159216/exp.txt")
+GSE159216_ann = data.table::fread("_drug_response/GSE159216/ann.txt")
+GSE159216_phe = data.table::fread("_drug_response/GSE159216/phe.txt")
+```
+
+# tidy data
+```{r}
+GSE5851_exp$ID_REF = GSE5851_ann$`Gene Symbol`[match(GSE5851_exp$ID_REF, GSE5851_ann$ID)]
+GSE5851_exp$ID_REF = stringr::str_split(GSE5851_exp$ID_REF, " ", simplify = T)[,1]
+mean_val = apply(GSE5851_exp[,2:ncol(GSE5851_exp)], 1, mean)
+GSE5851_exp = GSE5851_exp[order(mean_val, decreasing = T),]
+GSE5851_exp = GSE5851_exp[!duplicated(GSE5851_exp$ID_REF),]
+row.names(GSE5851_exp) = NULL
+GSE5851_exp = tibble::column_to_rownames(GSE5851_exp, var = "ID_REF")
+
+require(hta20transcriptcluster.db)
+mapping <- mapIds(
+  hta20transcriptcluster.db,
+  keys = GSE159216_exp$ID_REF,
+  column = 'SYMBOL',
+  keytype = 'PROBEID')
+GSE159216_exp$ID_REF = mapping
+GSE159216_exp = na.omit(GSE159216_exp)
+mean_val = apply(GSE5851_exp[,2:ncol(GSE5851_exp)], 1, mean)
+GSE159216_exp = GSE159216_exp[order(mean_val, decreasing = T),]
+GSE159216_exp = GSE159216_exp[!duplicated(GSE159216_exp$ID_REF),]
+row.names(GSE159216_exp) = NULL
+GSE159216_exp = tibble::column_to_rownames(GSE159216_exp, var = "ID_REF")
+```
+
+# save data
+```{r}
+GEO_drug = list(GSE5851 = list(exp = GSE5851_exp, phe = GSE5851_phe),
+                GSE159216 = list(exp = GSE159216_exp, phe = GSE159216_phe))
+saveRDS(GEO_drug, file = "07.drug_analysis/GEO_drug.rds")
+```
+
+# predict ES score
+```{r}
+scTidy = readRDS("06.SLRMP/scTidy.rds")
+sc_exp = lapply(scTidy, function(x){x = x$exp})
+sc_exp = do.call(cbind, sc_exp)
+
+scSEscore = lapply(scTidy, function(x){x = x$SErmps})
+scSEscore = do.call(rbind, scSEscore)
+scSEscore$Type = stringr::str_split(row.names(scSEscore), "_", simplify = T)[,2]
+scSEscore = subset(scSEscore, Type != "N")
+
+samGene = intersect(row.names(sc_exp), row.names(GSE5851_exp))
+sc_exp = sc_exp[samGene, row.names(scSEscore)]
+GSE5851_exp = GSE5851_exp[samGene, ]
+
+sc_exp = apply(sc_exp, 2, rank)
+GSE5851_exp = apply(GSE5851_exp, 2, rank)
+write.csv(sc_exp, file = "07.drug_analysis/sc_exp_GSE5851.csv")
+write.csv(GSE5851_exp, file = "07.drug_analysis/GSE5851_exp.csv")
+write.csv(scSEscore, file = "07.drug_analysis/scSEscore.csv")
+```
+
+```{r}
+scTidy = readRDS("06.SLRMP/scTidy.rds")
+sc_exp = lapply(scTidy, function(x){x = x$exp})
+sc_exp = do.call(cbind, sc_exp)
+
+scSEscore = lapply(scTidy, function(x){x = x$SErmps})
+scSEscore = do.call(rbind, scSEscore)
+scSEscore$Type = stringr::str_split(row.names(scSEscore), "_", simplify = T)[,2]
+scSEscore = subset(scSEscore, Type != "N")
+
+samGene = intersect(row.names(sc_exp), row.names(GSE159216_exp))
+sc_exp = sc_exp[samGene, row.names(scSEscore)]
+GSE159216_exp = GSE159216_exp[samGene, ]
+
+sc_exp = apply(sc_exp, 2, rank)
+GSE159216_exp = apply(GSE159216_exp, 2, rank)
+write.csv(sc_exp, file = "07.drug_analysis/sc_exp_GSE159216.csv")
+write.csv(GSE159216_exp, file = "07.drug_analysis/GSE159216_exp.csv")
+write.csv(scSEscore, file = "07.drug_analysis/scSEscore.csv")
+```
+
+# Analysis: GSE5851 rmps score & drug
+```{r}
+geo_drug = readRDS("07.drug_analysis/GEO_drug.rds")
+GSE5851_score = data.table::fread("07.drug_analysis/GSE5851_score.csv")
+GSE5851_score = GSE5851_score[-1, -1]
+colnames(GSE5851_score) = c("E1", "E3")
+GSE5851_score = data.frame(GSE5851_score)
+row.names(GSE5851_score) = colnames(geo_drug$GSE5851$exp)
+phe = geo_drug$GSE5851$phe
+colnames(phe) = c("id", "response")
+phe$E1 = GSE5851_score$E1[match(phe$id, row.names(GSE5851_score))]
+phe$E3 = GSE5851_score$E3[match(phe$id, row.names(GSE5851_score))]
+```
+
+```{r}
+dat = phe
+dat = subset(dat, response != "UTD")
+dat$response = ifelse(dat$response == "PD", "NR", "R")
+ggplot(dat, aes(x = response, y = E3)) +
+  geom_boxplot() +
+  stat_compare_means()
+
+p = ggplot(dat, aes(x = response, y = E3, color = response)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = response), width = 0.25, alpha = 0.8, size = 0.5) +
+  stat_compare_means(label.x  = 1.2) +
+  theme_classic() +
+  ylab("Stem-like RMP Score") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text = element_text(size = 10, colour = "black")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c("#d95f02","#1b9e77"))
+ggsave(filename = "07.drug_analysis/drug_E3.pdf", width = 2.5, height = 3)
+```
+
+
+
+# Analysis: GSE159286 rmps score & drug
+```{r}
+geo_drug = readRDS("07.drug_analysis/GEO_drug.rds")
+GSE159216_score = data.table::fread("07.drug_analysis/GSE159216_score.csv")
+GSE159216_score = GSE159216_score[-1, -1]
+colnames(GSE159216_score) = c("E1", "E3")
+GSE159216_score = data.frame(GSE159216_score)
+row.names(GSE159216_score) = colnames(geo_drug$GSE159216$exp)
+phe = geo_drug$GSE159216$phe
+colnames(phe)[2] = "id"
+phe$E1 = GSE159216_score$E1[match(phe$id, row.names(GSE159216_score))]
+phe$E3 = GSE159216_score$E3[match(phe$id, row.names(GSE159216_score))]
+```
+
+```{r}
+dat = phe
+# dat = subset(dat, chemotherapy_prior_to_tumor_sampling != "Naive")
+library(survival)
+library(survminer)
+dat = data.frame(os = dat$`60_months_overall_surviva`,
+                 os.time = dat$`60_months_overall_survival_time`,
+                 class = dat$E3)
+dat = na.omit(dat)
+dat$class = ifelse(dat$class > median(dat$class), "High", "Low")
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+# pdf(file = "06.geneCluster/rmpSurvial.pdf", width = 5, height = 6)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+```

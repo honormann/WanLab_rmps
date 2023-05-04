@@ -1,0 +1,253 @@
+# load data
+```{r}
+clusterGene = readRDS("08.rmps_immune/cluster_gene.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+```
+
+# Analysis: CenesusCluster
+```{r}
+library(ConsensusClusterPlus)
+phe = geo$phe
+# phe = subset(phe, GSE == "GSE39582")
+dat = as.data.frame(geo$exp)[,phe$GSM]
+clusterGene = subset(clusterGene, cluster %in% c("cluster1_up_H", "cluster1_up_P",
+                                                 "cluster2_up_H", "cluster2_up_P",
+                                                 "cluster3_up_H", "cluster3_up_P"))
+# dat = as.data.frame(geo$exp)[,phe$GSM]
+dat = dat[unique(clusterGene$gene),]
+dat = na.omit(dat)
+# dat = as.data.frame(dat)
+# dat = t(dat)
+dat = sweep(dat,1, apply(dat,1,median,na.rm=T))
+
+title="08.rmps_immune/cluster"
+results = ConsensusClusterPlus(as.matrix(dat),maxK=6,reps=50,pItem=0.8,pFeature=1,title=title,clusterAlg="hc",distance="pearson",seed=12345678,plot="png")
+
+saveRDS(results, file = "08.rmps_immune/geoGeneCluster.rds")
+```
+# Visualization: Cluster & GSE39582
+```{r}
+results = readRDS("08.rmps_immune/geoGeneCluster.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+cluster_gene = readRDS("08.rmps_immune/cluster_gene.rds")
+phe = geo$phe
+phe = subset(phe, GSE == "GSE39582")
+exp = geo$exp[unique(cluster_gene$gene), phe$GSM]
+consensusClass = results[[3]]$
+  consensusClass[match(phe$GSM, colnames(geo$exp))]
+  
+columnAnn = data.frame(id = phe$GSM, 
+        Clusters = paste("GeneCluster", consensusClass, sep = ""),
+        Sex = phe$Sex,
+        Age = ifelse(phe$Age>65, ">65", "<=65"),
+        Stage = paste("Stage", phe$tnm.stage, sep = " "),
+        Location = phe$tumor.location,
+        MMR = phe$mmr.status,
+        TP53 = phe$tp53.mutation,
+        Kras = phe$kras.mutation,
+        Braf = phe$braf.mutation
+        )
+
+columnAnn = columnAnn[order(columnAnn$Clusters),]
+```
+
+
+## visualization
+```{r}
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+# define colors
+# col_fun = c("#5e3c99", "#b2abd2", "#f7f7f7", "#fdb863", "#e66101")
+col_fun = brewer.pal(5, "PuOr")
+col_fun = colorRampPalette(rev(col_fun))(100)
+
+datasets_col = colorRampPalette(brewer.pal(10, "Paired"))(10)
+names(datasets_col) = unique(columnAnn$datasets)
+columnAnn = subset(columnAnn, Stage != "Stage 0")
+
+# annotation
+column_ha = HeatmapAnnotation(Cluster = columnAnn$Clusters,
+                              Sex = columnAnn$Sex,
+                              Age = columnAnn$Age,
+                              Stage = columnAnn$Stage,
+                              Location = columnAnn$Location,
+                              MMR = columnAnn$MMR,
+                              TP53 = columnAnn$TP53,
+                              Kras = columnAnn$Kras,
+                              Braf = columnAnn$Braf,
+               col = list(Cluster = c("GeneCluster1" = "#ec7014", 
+                                       "GeneCluster2" = "#88419d" ,
+                                      "GeneCluster3" = "#238b45" 
+                                       ),
+                          Sex = c("Female" = "#d94701", 
+                                   "Male" = "#abd9e9" ),
+                          Age = c("<=65" = "#d94701",
+                                  ">65" = "#abd9e9"),
+                          Stage = c("Stage 1" = "#d7191c",
+                                    "Stage 2" = "#fdae61",
+                                    "Stage 3" = "#abd9e9",
+                                    "Stage 4" = "#2c7bb6"),
+                          Location = c("distal" = "#d94701",
+                                       "proximal" = "#abd9e9"),
+                          MMR = c("dMMR" = "#d94701",
+                                  "pMMR" = "#abd9e9"),
+                          TP53 = c("M" = "#d94701",
+                                   "WT" = "#b2e2e2"),
+                          Kras = c("M" = "#d94701",
+                                   "WT" = "#b2e2e2"),
+                          Braf = c("M" = "#d94701",
+                                   "WT" = "#b2e2e2"))
+               )
+
+dat = exp[,columnAnn$id]
+scale_data = function(x){
+  # x = (x-mean(x))/sd(x)
+  # x = (x-min(x))/(max(x) - min(x))
+  x = x - mean(x)  
+  x = x / max(abs(x))
+  return(x)
+}
+dat = apply(dat, 1, scale_data)
+dat = t(dat)
+
+pdf(file = "08.rmps_immune/GeneClusterHeatmap.pdf", width = 10, height = 6)
+Heatmap(dat, col = col_fun,
+        show_column_dend = FALSE,
+        column_order = columnAnn$id,
+        show_column_names  = FALSE,
+        show_row_names = FALSE,
+        # row_names_gp = gpar(fontface = "italic"),
+        top_annotation = column_ha)
+dev.off()
+```
+
+# Analysis: RMScore & Survival
+```{r}
+RMscore = readRDS("08.rmps_immune/geo_RMscore.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+phe = geo$phe
+
+dat = data.frame(os = phe$os.event, os.time = phe$os.time, 
+                 class = ifelse(RMscore$RMscore > median(RMscore$RMscore),
+                                "High", "Low"), 
+                 GSE = phe$GSE)
+
+dat = na.omit(dat)
+dat = subset(dat, GSE == "GSE17536") # GSE39582, GSE17536
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(os.time, os)~class, 
+                data=dat)
+
+pdf(file = "08.rmps_immune/rmpSurvial_GSE17536.pdf", width = 4.5, height = 5.5)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+
+# Analysis: Cluster & RMscore
+## RMPCluster
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+results = readRDS("04.rmps_cluster/cluster.rds")
+RMscore = readRDS("08.rmps_immune/geo_RMscore.rds")
+
+dat = data.frame(class = results[[3]]$consensusClass, RMscore = RMscore$RMscore)
+dat$class = paste("cluster", dat$class, sep = "")
+
+p = ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.5, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("cluster1" = "#ec7014", 
+                               "cluster2" = "#88419d",
+                               "cluster3" = "#238b45")) +  
+  stat_compare_means(label = "p.signif", label.x = 1.8) +
+  theme(legend.position = "top") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text = element_text(colour = "black")) +
+  theme(legend.position = "none")
+
+ggsave(p, filename = "08.rmps_immune/cluster_rmps_score.pdf", width = 2, height = 3.5)
+```
+
+## Analysis: RMscore MMR
+```{r}
+RMscore = readRDS("08.rmps_immune/geo_RMscore.rds")
+geo = readRDS("01.datatidy/GEO_afterBatch.rds")
+
+phe = geo$phe
+dat = data.frame(mmr = phe$mmr.status, RMscore = RMscore$RMscore)
+dat = na.omit(dat)
+dat = subset(dat, mmr %in% c("dMMR",  "MSI",  "MSS", "pMMR"))
+```
+
+## visualization
+```{r}
+library(ggplot2)
+dat$mmr = factor(dat$mmr, levels = c("pMMR", "dMMR", "MSS", "MSI"))
+p = ggplot(dat, aes(x = mmr, y = RMscore, color = mmr)) +
+  geom_boxplot(aes(x = mmr), width = 0.8, outlier.shape = NA) +
+  geom_point(position=position_jitterdodge(jitter.width = 1, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("dMMR" = "#ec7014", 
+                                "MSI" = "#ec7014",
+                                "MSS" = "#88419d", 
+                                "pMMR" = "#88419d")) +  
+  stat_compare_means(label = "p.signif", label.x = 2.4) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text = element_text(color = "black"))
+ggsave(p, filename = "08.rmps_immune/RMscore_MMR.pdf", width = 2, height = 3)
+p
+```
+
+# Analysis: RMscore & CMS
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+results = readRDS("01.datatidy/geoCMS.rds")
+RMscore = readRDS("08.rmps_immune/geo_RMscore.rds")
+
+dat = data.frame(class = results$prediction, RMscore = RMscore$RMscore)
+dat$class = paste("cluster", dat$class, sep = "")
+dat = subset(dat, class != "clusterNA")
+p = ggplot(dat, aes(x = class, y = RMscore, color = class)) +
+  geom_boxplot(aes(x = class), width = 0.8, outlier.shape = NA) +
+  # geom_jitter(aes(x = Gene, color = Type), size = 0.1, alpha = 0.3,width = 0.35) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.5, 
+                                           dodge.width = 0.8), 
+             size = 0.1, alpha = 0.8)+
+  theme_classic()+
+  theme(panel.grid=element_blank()) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30)) +
+  ylab("RMscore") +
+  scale_color_manual(values = c("clusterCMS1" = "#ff7f00",
+                               "clusterCMS2" = "#4daf4a",
+                               "clusterCMS3" = "#984ea3",
+                               "clusterCMS4" = "#c51b7d")) +
+  stat_compare_means(label = "p.signif", label.x = 2.4) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text  = element_text(colour = "black"))
+ggsave(p, filename = "08.rmps_immune/RMscore_CMS_geo.pdf", width = 2, height = 3)
+```
+

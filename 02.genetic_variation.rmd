@@ -1,0 +1,300 @@
+# Mutation Analysis
+## Extract CRC sample
+```{r}
+library(dplyr)
+library(maftools)
+
+mut_raw = readRDS("01.datatidy/mut_raw.rds")
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) != "01B") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+
+crcId = data.frame(Barcode = mut_raw@variants.per.sample$Tumor_Sample_Barcode,
+        id = stringr::str_sub(mut_raw@variants.per.sample$Tumor_Sample_Barcode, 1, 12)) %>%
+  subset(id %in% crcPhe$id) 
+
+crcMut = subsetMaf(maf = mut_raw, tsb = crcId$Barcode)
+saveRDS(crcMut, file = "02.rmps_genetic_variation/crc_mut.rds")
+```
+
+## Analysis: RMPs mutation landscape
+```{r}
+crcMut = readRDS("02.rmps_genetic_variation/crc_mut.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+Sgene = rmps$Symbol
+col = c("#a6cee3", "#6a51a3", "#d94801", "#33a02c",
+        "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00")
+# col = rev(col)
+names(col) = c('Frame_Shift_Del','Missense_Mutation', 'Nonsense_Mutation', 'Multi_Hit', 'Frame_Shift_Ins','In_Frame_Ins', 'Splice_Site', 'In_Frame_Del')
+pdf("02.rmps_genetic_variation/mut_landscape.pdf", width = 5, height = 9)
+oncoplot(maf = crcMut, genes=Sgene,
+         colors = col, bgCol="#f0f0f0")
+dev.off()
+```
+## Analysis: RMPs mutation & survival
+```{r}
+crcMut = readRDS("02.rmps_genetic_variation/crc_mut.rds")
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) != "01B") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+
+rmps = readRDS("01.datatidy/rmps.rds")
+dat = subset(crcMut@data, Hugo_Symbol %in% rmps$Symbol)
+mut_id = stringr::str_sub(unique(dat$Tumor_Sample_Barcode), 1, 16)
+
+crc_sur = subset(tcga_phe$sur, sample %in% crcPhe$sample)
+crc_sur$mutType = ifelse(crc_sur$sample %in% mut_id, "mut", "wt")
+
+# survival analysis
+library(dplyr)
+library(survival)
+library(survminer)
+sfit <- survfit(Surv(OS.time, OS)~mutType, 
+                data=crc_sur)
+
+pdf(file = "02.rmps_genetic_variation/rmp_mut_Survial.pdf", width = 4.5, height = 6)
+ggsurvplot(sfit, 
+           pval=TRUE,
+           palette = c("#ec7014", "#88419d","#238b45"),
+           risk.table = TRUE)
+dev.off()
+```
+
+## Analysis: RMPs mutation association
+```{r}
+crcMut = readRDS("02.rmps_genetic_variation/crc_mut.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+dat = subset(crcMut@data, Hugo_Symbol %in% rmps$Symbol)
+dat = data.frame(table(dat$Hugo_Symbol, dat$Tumor_Sample_Barcode))
+dat = reshape2::dcast(dat, Var1~Var2)
+dat = tibble::column_to_rownames(dat, var = "Var1")
+dat = t(dat)
+M<-cor(dat)
+
+# mat : is a matrix of data
+# ... : further arguments to pass to the native R cor.test function
+cor.mtest <- function(mat, ...) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(mat[, i], mat[, j], ...)
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+# matrix of the p-value of the correlation
+p.mat <- cor.mtest(dat)
+
+library(corrplot)
+corrplot(M, type="upper", order="hclust", 
+         p.mat = p.mat, sig.level = 0.01, insig = "blank",tl.col="black")
+```
+
+# CNV Analysis
+## tidy data
+```{r}
+cnv = readRDS("01.datatidy/cnv.rds")
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+Sgene = rmps$Symbol
+
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) != "01B") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+
+crcScnv = cnv %>% subset(V1 %in% Sgene) %>%
+  tibble::column_to_rownames(var = "V1") %>%
+  data.frame()
+
+colnames(crcScnv) = stringr::str_replace_all(colnames(crcScnv), "[.]", "-") 
+crcScnv = crcScnv[, stringr::str_sub(colnames(crcScnv), 1, 12) %in% crcPhe$id]
+saveRDS(crcScnv, file = "02.rmps_genetic_variation/RMPs_cnv.rds")
+```
+
+## visualization
+```{r}
+library(ggplot2)
+dat = as.data.frame(t(crcScnv))
+dat = as.list(dat)
+
+GetCNV_summ = function(subgene){
+        gain = sum(subgene>0)
+        loss = sum(subgene<0)
+        non = sum(subgene==0)
+        out = data.frame(gain=gain, loss=loss, non=non)
+      }
+
+dat = lapply(dat, GetCNV_summ)
+dat = do.call(rbind, dat)
+dat$gene = row.names(dat)
+dat = reshape2::melt(dat)
+colnames(dat) = c("gene", "condition", "value")
+dat = subset(dat, condition != "non")
+dat$freq = round(dat$value/ncol(crcScnv), 3)
+
+# Binding information
+dat$mod = rmps$ModificationSymbol[match(dat$gene, rmps$Symbol)]
+dat = dat[order(dat$mod),]
+# dat$gene = paste(dat$gene, dat$mod, sep = "_")
+dat$gene = factor(dat$gene, levels = unique(dat$gene))
+
+dat$value = dat$freq * 100
+input = reshape2::dcast(dat, gene + mod ~ condition)
+# input = input[39:47,]
+
+p = ggplot(data = input, aes(x = gene, y = gain)) + 
+  geom_bar(stat = "identity", fill = "#f16913", alpha = 0.8)+
+  geom_bar(data = input, aes(x = gene, y = loss),
+           stat = "identity", fill = "#54278f", width = 0.5) +
+  # coord_flip() + 
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 45))+
+  ylab("Frequency (100%)")
+
+ggsave(p, filename = "02.rmps_genetic_variation/crcCNV_landscape_4.pdf", width = 10, height = 2)
+```
+
+# Exp Analysis
+## datatidy:heatmap
+```{r}
+library(dplyr)
+rmpExp = readRDS("01.datatidy/RMP_exp.rds")
+tcga_phe = readRDS("01.datatidy/tcga_phe.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+Sgene = rmps$Symbol
+crcPhe = tcga_phe$phe %>% 
+  subset(program == "TCGA") %>% 
+  subset(project_id %in% c("TCGA-COAD", "TCGA-READ")) %>%
+  subset(stringr::str_length(sample) == 16)  %>%
+  subset(stringr::str_sub(sample, 14, 16) != "01B") %>%
+  mutate(id = stringr::str_sub(sample, 1, 12)) 
+ 
+NormalId =  subset(crcPhe, sample_type == "Solid Tissue Normal")$id
+pairCRC = subset(crcPhe, id %in% NormalId)
+pairExp = rmpExp[intersect(pairCRC$sample, row.names(rmpExp)),] %>% as.data.frame()
+pairExp = pairExp[, Sgene]
+samType = crcPhe$sample_type[match(row.names(pairExp), crcPhe$sample)]
+samType = ifelse(samType == "Solid Tissue Normal", "N", "T")
+# pairExp$Type = samType
+dat = t(pairExp) %>% data.frame()
+columnAnn = data.frame(id = colnames(dat), 
+                       Type = samType)
+```
+
+## visualization:
+```{r}
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+# define colors
+# col_fun = c("#756bb1", "#fd8d3c", "#de2d26")
+col_fun = brewer.pal(5, "PuOr")
+col_fun = colorRampPalette(rev(col_fun))(100)
+# col_fun = colorRampPalette(col_fun)(100)
+
+datasets_col = colorRampPalette(brewer.pal(10, "Paired"))(12)
+names(datasets_col) = unique(columnAnn$datasets)
+
+# annotation
+column_ha = HeatmapAnnotation(Type = columnAnn$Type,
+                              col = list(Type = c("T" = "#ec7014", 
+                                                  "N" = "#88419d")))
+
+
+# dat = dat[rowAnn$Sig,columnAnn$id]
+
+scale_data = function(x){
+  # x = (x-mean(x))/sd(x)
+  # x = (x-min(x))/(max(x) - min(x))
+  x = x - mean(x)  
+  x = x / max(abs(x))
+  return(x)
+}
+dat = apply(dat, 1, scale_data)
+dat = t(dat)
+  
+pdf(file = "02.rmps_genetic_variation/Rmps_heatmap.pdf", width = 7, height = 7)
+Heatmap(dat, col = col_fun,
+        clustering_distance_columns  = "pearson",
+        clustering_distance_rows  = "pearson",
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        # column_order = columnAnn$id,
+        show_column_names  = FALSE,
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontface = "italic"),
+        top_annotation = column_ha,
+        column_split = columnAnn$Type,
+        # row_split = rowType
+        )
+dev.off()
+```
+
+# Analysis: CNV & Expression
+```{r}
+exp = readRDS("01.datatidy/RMP_exp.rds")
+cnv = readRDS("02.rmps_genetic_variation/RMPs_cnv.rds")
+
+sam = intersect(row.names(exp), colnames(cnv))
+cnv = cnv[,sam]
+exp = t(exp[sam, row.names(cnv)]) %>% data.frame()
+```
+
+```{r}
+library(ggpubr)
+library(ggplot2)
+Gene = c("PCIF1", "TRMT12", "TRMT13", "TGS1", "DIMT1", "HENMT1")
+Gene.res = as.list(Gene)
+names(Gene.res) = Gene
+
+Plots = function(subgene){
+  dat = data.frame(cnv = t(cnv[subgene,]), exp = t(exp[subgene,]))
+colnames(dat) = c("cnv", "exp")
+dat$cnv = ifelse(dat$cnv > 0, "Gain", ifelse(dat$cnv < 0, "Loss", "Normal"))
+dat$cnv = factor(dat$cnv, levels = c("Loss", "Normal", "Gain"))
+
+library(RColorBrewer)
+colors = colorRampPalette(brewer.pal(4, "Dark2"))(3)
+p = ggplot(dat, aes(x = cnv, y = exp, color = cnv)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = cnv), width = 0.25, alpha = 0.8, size = 0.5) +
+  stat_compare_means(label = "p.signif", label.x  = 2) +
+  theme_classic() +
+  ylab("Expression") +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text = element_text(size = 10, colour = "black")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c(`Loss` = "#6a3d9a",
+                                `Normal` = "#006d2c",
+                                `Gain` = "#ff7f00")) +
+  ggtitle(subgene) +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
+  return(p)
+}
+Gene.res = lapply(Gene.res, Plots)
+out = patchwork::wrap_plots(Gene.res, 
+                    nrow = 2, ncol = 3)
+ggsave(out, filename = "02.rmps_genetic_variation/cnv_exp.pdf",
+       width = 7, height = 6.5)
+```
+

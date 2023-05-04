@@ -1,0 +1,363 @@
+# load data
+```{r}
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+ST = readRDS("01.datatidy/ST_data.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+```
+
+# Data preprocessing
+```{r}
+DataPre = function(dat){
+  dat = SCTransform(dat, assay = "Spatial", verbose = FALSE)
+  return(dat)
+}
+ST = lapply(ST, DataPre)
+names(ST) = c("colon1", "colon2", "colon3", "colon4",
+              "liver1", "liver2","liver3","liver4")
+saveRDS(ST, file = "01.datatidy/ST_transform.rds")
+```
+
+# Dimensionality reduction, clustering, and visualization
+```{r}
+DimData = function(dat){
+  dat <- RunPCA(dat, assay = "SCT", verbose = FALSE)
+  dat <- FindNeighbors(dat, reduction = "pca", dims = 1:30)
+  dat <- FindClusters(dat, verbose = FALSE)
+  dat <- RunUMAP(dat, reduction = "pca", dims = 1:30)
+  return(dat)
+}
+ST = lapply(ST, DimData)
+saveRDS(ST, file = "01.datatidy/ST_DimReduce.rds")
+```
+
+# FindMarker and Ann
+```{r}
+library(ggpubr)
+DimFig = function(dat){
+  # p <- DimPlot(dat, reduction = "umap", label = TRUE)
+  p <- SpatialDimPlot(dat, label = TRUE, label.size = 3)
+  return(p)
+}
+
+DimFigs = lapply(ST, DimFig)
+p = ggarrange(plotlist = DimFigs, labels = names(ST), ncol = 4, nrow = 2)
+ggsave(p, filename = "03.spatial/spartial_cluster.pdf", width = 20, height = 10)
+```
+
+
+```{r}
+FindMarks = function(dat){
+  dat <- FindAllMarkers(dat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+  return(dat)
+}
+spatial_marker = lapply(ST, FindMarks)
+saveRDS(spatial_marker, file = "03.spatial/spatial_markers.rds")
+```
+# choose and ann
+```{r}
+colon1 = ST$colon1
+new.cluster.ids <- c("Tumor", 
+                     "Tumor", "Tumor",
+                     "Fibro", 
+                     "Epithelium", "Lamina propria", 
+                     "Lamina propria",
+                     "Tumor", "Epithelium")
+
+names(new.cluster.ids) <- levels(colon1)
+colon1 <- RenameIdents(ST$colon1, new.cluster.ids)
+```
+
+```{r}
+liver1 = ST$liver1
+new.cluster.ids <- c("Hepatocytes", 
+                     "Hepatocytes", "Epithelium",
+                     "Tumor","Tumor","Tumor", 
+                     "Fibro", "Epithelium", 
+                     "Tumor", "Fibro",
+                     "Hepatocytes", "Hepatocytes")
+
+names(new.cluster.ids) <- levels(liver1)
+liver1 <- RenameIdents(liver1, new.cluster.ids)
+```
+
+```{r}
+colon4 = ST$colon4
+new.cluster.ids <- c("Tumor", "Fibro", "Tumor",
+                     "Lamina propria", 
+                     "Fibro", "Fibro", "Tumor",
+                     "Lamina propria", 
+                     "Fibro","Lamina propria","Fibro", 
+                     "Fibro", "Lamina propria")
+
+names(new.cluster.ids) <- levels(colon4)
+colon4 <- RenameIdents(colon4, new.cluster.ids)
+```
+
+```{r}
+liver4 = ST$liver4
+new.cluster.ids <- c("Hepatocytes", "Hepatocytes", "Tumor",
+                     "Fibro", 
+                     "Fibro", "Tumor", "Hepatocytes",
+                     "Tumor", 
+                     "Hepatocytes","Epithelium")
+
+names(new.cluster.ids) <- levels(liver4)
+liver4 <- RenameIdents(liver4, new.cluster.ids)
+```
+
+
+```{r}
+ST_chose = list(colon1 = colon1, colon4 = colon4,
+                liver1 = liver1, liver4 = liver4)
+saveRDS(ST_chose, file = "01.datatidy/ST_chose.rds")
+```
+
+# Visualization: chose & ann data
+```{r}
+library(ggpubr)
+pc1 <- SpatialDimPlot(ST_chose$colon1, label = FALSE, label.size = 2,
+                      cols = c(`Tumor` = "#ff7f00", 
+                               `Fibro` = "#33a02c", 
+                               `Epithelium` = "#fb9a99",
+                               `Lamina propria` = "#cab2d6")) 
+
+pc4 <- SpatialDimPlot(ST_chose$colon4, label = FALSE, label.size = 2,
+                      cols = c(`Tumor` = "#ff7f00", 
+                               `Fibro` = "#33a02c", 
+                               # `Epithelium` = "#fb9a99", 
+                               `Lamina propria` = "#cab2d6")) 
+
+lv1 <- SpatialDimPlot(ST_chose$liver1, label = FALSE, label.size = 2,
+                      cols = c(`Tumor` = "#ff7f00", 
+                               `Fibro` = "#33a02c", 
+                               `Epithelium` = "#fb9a99",
+                               `Hepatocytes` = "#1f78b4")) 
+
+
+lv4 <- SpatialDimPlot(ST_chose$liver4, label = FALSE, label.size = 2,
+                      cols = c(`Tumor` = "#ff7f00", 
+                               `Fibro` = "#33a02c", 
+                               `Epithelium` = "#fb9a99",
+                               `Hepatocytes` = "#1f78b4")) 
+
+DimFigs = list(colon1 = pc1, colon4 = pc4,
+               liver1 = lv1, liver4 = lv4)
+p = ggarrange(plotlist = DimFigs, labels = names(DimFigs), ncol = 2, nrow = 2)
+ggsave(p, filename = "03.spatial/spartial_chose.pdf", width = 10, height = 10)
+```
+
+# Mapping rmps gene names
+```{r}
+ST_chose = readRDS("01.datatidy/ST_chose.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+table(rmps$Symbol %in% row.names(ST_chose$colon1))
+
+convertRownames <- function(seu_object) {
+  new_rownames = row.names(seu_object)
+  new_rownames[which(new_rownames == "MRM2")] = "FTSJ2"
+  new_rownames[which(new_rownames == "BUD23")] = "WBSCR22"
+  new_rownames[which(new_rownames == "MRM3")] = "RNMTL1"
+  rownames(seu_object@assays$SCT@counts) <- new_rownames
+  rownames(seu_object@assays$SCT@data) <- new_rownames
+  new_rownames = row.names(seu_object@assays$Spatial)
+  new_rownames[which(new_rownames == "MRM2")] = "FTSJ2"
+  new_rownames[which(new_rownames == "BUD23")] = "WBSCR22"
+  new_rownames[which(new_rownames == "MRM3")] = "RNMTL1"
+  rownames(seu_object@assays$Spatial@counts) <- new_rownames
+  rownames(seu_object@assays$Spatial@data) <- new_rownames
+  return(seu_object)
+}
+
+ST_chose = lapply(ST_chose, convertRownames)
+table(rmps$Symbol %in% row.names(ST_chose$colon1))
+saveRDS(ST_chose, file = "01.datatidy/ST_chose.rds") # rewrite file
+```
+
+# Analysis: ssGSEA-->enrichment of rmps score
+```{r}
+ST_chose = readRDS("01.datatidy/ST_chose.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+```
+
+## enrichment analysis
+```{r}
+EnrichAn = function(st_obj){
+  sets = list(rmps = rmps$Symbol)
+  dat = st_obj@assays$Spatial@counts
+  rmps_score = GSVA::gsva(dat,                     sets,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+  dat = st_obj@images$slice1@coordinates
+  dat$cell = st_obj@active.ident
+  dat$score = rmps_score@x
+  return(dat)
+}
+enrich.res = lapply(ST_chose, EnrichAn)
+saveRDS(enrich.res, file = "03.spatial/enrich.res.rds")
+```
+## visualization: scatter plot
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+
+ScatterV = function(dat){
+  colors = brewer.pal(10, "PuOr")
+  p = ggplot(dat, aes(x = col, y = row, color = score)) +
+    geom_point() +
+    theme_bw()+
+    scale_colour_gradientn(colours = colorRampPalette(rev(colors))(100))+
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_blank(),
+          axis.title = element_blank(), axis.text = element_blank(),
+          axis.ticks = element_blank()) 
+  return(p)
+}
+
+scatter.res = lapply(enrich.res, ScatterV)
+out = patchwork::wrap_plots(scatter.res, ncol = 2, now = 2)
+ggsave(out, filename = "03.spatial/enrich_scatter.pdf", width = 8, height = 6)
+```
+
+## visualization: violin plot:CRC1 CRC4
+```{r}
+CRC1 = enrich.res$colon1
+CRC1$id = "CRC1"
+CRC1$cell_id = paste(CRC1$id, CRC1$cell, sep = "_")
+
+CRC4 = enrich.res$colon4
+CRC4$id = "CRC4"
+CRC4$cell_id = paste(CRC4$id, CRC4$cell, sep = "_")
+
+dat = rbind(CRC1, CRC4)
+dat$cell_id = factor(dat$cell_id, levels = c("CRC1_Tumor",
+      "CRC1_Fibro", "CRC1_Epithelium", "CRC1_Lamina propria",
+      "CRC4_Tumor", "CRC4_Fibro", "CRC4_Lamina propria"))
+
+color = colorRampPalette(brewer.pal(8, "Set1"))(11)
+
+p = ggplot(dat, aes(x = cell_id, y = score, fill = cell_id)) +
+  geom_violin() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  scale_fill_manual(values = rev(color)) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  ylab("Enrichment Score") +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(axis.title.y = element_text(color = "black", size = 12))
+ggsave(p, filename = "03.spatial/enrich_violin_CRC1_CRC4.pdf",
+       width = 4.5, height = 2.2)
+```
+
+## visualization: violin plot:LM1 LM4
+```{r}
+LM1 = enrich.res$liver1
+LM1$id = "LM1"
+LM1$cell_id = paste(LM1$id, LM1$cell, sep = "_")
+
+LM4 = enrich.res$liver4
+LM4$id = "LM4"
+LM4$cell_id = paste(LM4$id, LM4$cell, sep = "_")
+
+dat = rbind(LM1, LM4)
+dat$cell_id = factor(dat$cell_id, levels = c("LM1_Tumor",
+      "LM1_Fibro", "LM1_Epithelium", "LM1_Hepatocytes",
+      "LM4_Tumor", "LM4_Fibro","LM4_Epithelium", "LM4_Hepatocytes"))
+
+color = colorRampPalette(brewer.pal(8, "Set1"))(11)
+
+p = ggplot(dat, aes(x = cell_id, y = score, fill = cell_id)) +
+  geom_violin() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  scale_fill_manual(values = rev(color)) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank()) +
+  ylab("Enrichment Score") +
+  theme(axis.text = element_text(color = "black", size = 10)) +
+  theme(axis.title.y = element_text(color = "black", size = 12))
+ggsave(p, filename = "03.spatial/enrich_violin_LM1_LM4.pdf",
+       width = 4.5, height = 2.2)
+```
+
+# Analysis: DEG
+```{r}
+library(limma)
+library(dplyr)
+
+st_chose = readRDS("01.datatidy/ST_chose.rds")
+rmps = readRDS("01.datatidy/rmps.rds")
+LimmaDeg = function(TreatDat, ConDat){
+  list <- c(rep("Treat", ncol(TreatDat)), 
+            rep("Control", ncol(ConDat))) %>% factor(., levels = c("Control", "Treat"), ordered = F)
+  list <- model.matrix(~factor(list)+0)  #把group设置成一个model matrix
+  colnames(list) <- c("Control", "Treat")
+  df = cbind(TreatDat, ConDat) 
+  # df = apply(df, 2, as.numeric)
+  df.fit <- lmFit(df, list)  ## 数据与list进行匹配
+  
+  df.matrix <- makeContrasts(Treat - Control, levels = list)
+  fit <- contrasts.fit(df.fit, df.matrix)
+  fit <- eBayes(fit)
+  tempOutput <- topTable(fit,n = Inf, adjust = "fdr")
+  return(tempOutput)
+}
+
+Tcolon1 = as.data.frame(st_chose$colon1@assays$SCT@counts)[rmps$Symbol,]
+Tcolon4 = as.data.frame(st_chose$colon4@assays$SCT@counts)[rmps$Symbol,]
+Tliver1 = as.data.frame(st_chose$liver1@assays$SCT@counts)[rmps$Symbol,]
+Tliver4 = as.data.frame(st_chose$liver4@assays$SCT@counts)[rmps$Symbol,]
+
+liver1_vs_colon1 = LimmaDeg(Tliver1, Tcolon1)
+liver4_vs_colon4 = LimmaDeg(Tliver4, Tcolon4)
+colon4_vs_colon1 = LimmaDeg(Tcolon4, Tcolon1)
+liver4_vs_liver1 = LimmaDeg(Tliver4, Tliver1)
+
+
+## visualization
+liver1_vs_colon1$gene = row.names(liver1_vs_colon1)
+liver1_vs_colon1$group = "liver1_vs_colon1"
+
+liver4_vs_colon4$gene = row.names(liver4_vs_colon4)
+liver4_vs_colon4$group = "liver4_vs_colon4"
+
+colon4_vs_colon1$gene = row.names(colon4_vs_colon1)
+colon4_vs_colon1$group = "colon4_vs_colon1"
+
+liver4_vs_liver1$gene = row.names(liver4_vs_liver1)
+liver4_vs_liver1$group = "liver4_vs_liver1"
+
+dat = rbind(liver1_vs_colon1, liver4_vs_colon4,
+            colon4_vs_colon1, liver4_vs_liver1)
+dat$group = factor(dat$group, levels = c("liver1_vs_colon1", "liver4_vs_colon4",
+                                         "colon4_vs_colon1", "liver4_vs_liver1"))
+
+
+
+library(RColorBrewer)
+colors = c("#bebada",
+           "#80b1d3",
+           "#8dd3c7",
+           # "#ffffb3",
+           "#fdb462",
+           "#fb8072")
+colors = brewer.pal(10, "PuOr")
+
+dat$adj.P.Val = dat$adj.P.Val + 1e-303
+dat$gene = factor(dat$gene, levels = rev(rmps$Symbol))
+p = ggplot(dat, aes(x = group, y = gene)) +
+  geom_point(aes(size = -log10(adj.P.Val), color = logFC)) + theme_bw() +
+  theme(panel.grid=element_blank())  +
+  scale_colour_gradientn(colours = colorRampPalette(colors)(100))  +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 1, angle = 30))+
+  theme(axis.title = element_blank()) +
+  theme(axis.text.y = element_text(face = "italic"))+
+  theme(axis.text = element_text(colour = "black"))
+
+ggsave(p, filename = "03.spatial/rmps_diff_station.pdf", width = 3.5, height = 8)
+write.table(dat, file = "03.spatial/rmps_diff_station.xls", sep = "\t", row.names = F)
+
+```
+
